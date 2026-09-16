@@ -1,0 +1,464 @@
+{
+  "id": "smGenerate000001",
+  "name": "SM · Generate Draft",
+  "nodes": [
+    {
+      "id": "1c1f167c-8b56-516d-a228-bcc5ea04ca20",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        340
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "7a61d438-0c1b-5f6a-a632-6fa7e101b02e",
+      "name": "Load Post Context",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        260,
+        340
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT p.id AS post_id, p.brief, p.source_media_url, p.platforms,\n       c.name AS client_name, c.telegram_chat_id AS chat_id,\n       b.business_description, b.voice, b.audience, b.language, b.default_cta,\n       b.hashtags AS brand_hashtags, b.banned_words, b.emoji_policy, b.sample_posts,\n       v.fb_caption AS prev_fb, v.ig_caption AS prev_ig\nFROM posts p\nJOIN clients c ON c.id = p.client_id\nLEFT JOIN brand_profiles b ON b.client_id = c.id\nLEFT JOIN post_versions v ON v.post_id = p.id AND v.version = p.current_version\nWHERE p.id = $1::uuid AND p.status = 'generating';",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "98765fab-79ea-56b8-af60-c31fbe8ff0d6",
+      "name": "Build AI Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        340
+      ],
+      "parameters": {
+        "jsCode": "// Build the Gemini generateContent request for a post draft (or a revision).\nconst p = $input.first().json;\nconst feedback = String($('When Called').first().json.feedback || '').trim();\n\nconst list = (arr) => (Array.isArray(arr) ? arr.filter(Boolean) : []);\nconst brand = [\n  `Business name: ${p.client_name}`,\n  p.business_description && `About the business: ${p.business_description}`,\n  p.audience && `Target audience: ${p.audience}`,\n  p.voice && `Brand voice: ${p.voice}`,\n  `Language: ${p.language || 'English'}`,\n  p.emoji_policy && `Emoji use: ${p.emoji_policy}`,\n  p.default_cta && `Default call to action: ${p.default_cta}`,\n  list(p.brand_hashtags).length && `Brand hashtags (always relevant): ${list(p.brand_hashtags).join(' ')}`,\n  list(p.banned_words).length && `Never use these words: ${list(p.banned_words).join(', ')}`,\n  p.sample_posts && `Examples of past posts in the brand's style:\\n${p.sample_posts}`,\n].filter(Boolean).join('\\n');\n\nconst system = `You write social media posts for a small business. The business owner reviews every draft before anything is published.\n\nFacebook caption: conversational and complete, usually 40-120 words unless the brief asks for something else. Links and phone numbers are fine when the brief provides them. Use at most 3 hashtags inline.\n\nInstagram caption: the first line must hook the reader because the feed cuts it off after about 125 characters. Use short paragraphs and end with a clear call to action. Do not include URLs because they are not clickable on Instagram; say \"link in bio\" if a link matters. Do not put hashtags in the caption text.\n\nHashtags: return 5-15 relevant Instagram hashtags in the hashtags field, mixing broad, niche and local tags. Each starts with # and has no spaces.\n\nOnly state prices, dates, offers, addresses and contact details that appear in the brief or brand profile. If something the post clearly needs is missing, write around it and mention it in notes_for_client. Keep notes_for_client to one or two short sentences, or an empty string when nothing is worth flagging.\n\nWrite in the brand's language and voice.`;\n\nlet text = `<brand_profile>\\n${brand}\\n</brand_profile>\\n\\n<brief>\\n${p.brief || '(No written brief. Base the post on the attached photo.)'}\\n</brief>`;\nif (p.source_media_url) text += '\\n\\nThe attached photo will be published together with both captions.';\nif (feedback) {\n  text += `\\n\\n<previous_draft>\\nFacebook:\\n${p.prev_fb || ''}\\n\\nInstagram:\\n${p.prev_ig || ''}\\n</previous_draft>`;\n  text += `\\n\\n<client_feedback>\\n${feedback}\\n</client_feedback>\\n\\nRevise the draft to address the client's feedback. Keep everything they did not ask to change.`;\n}\n\nconst parts = [{ text }];\n\nreturn [{\n  json: {\n    post_id: p.post_id,\n    chat_id: p.chat_id,\n    platforms: p.platforms || [],\n    source_media_url: p.source_media_url || null,\n    brand_hashtags: list(p.brand_hashtags),\n    banned_words: list(p.banned_words),\n    feedback,\n    request: {\n      systemInstruction: {\n        parts: [{ text: system }]\n      },\n      contents: [\n        {\n          role: 'user',\n          parts\n        }\n      ],\n      generationConfig: {\n        responseMimeType: 'application/json',\n        responseSchema: {\n          type: 'OBJECT',\n          properties: {\n            facebook_caption: { type: 'STRING' },\n            instagram_caption: { type: 'STRING' },\n            hashtags: { type: 'ARRAY', items: { type: 'STRING' } },\n            notes_for_client: { type: 'STRING' }\n          },\n          required: ['facebook_caption', 'instagram_caption', 'hashtags', 'notes_for_client']\n        }\n      }\n    },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "89bbb88f-9fc1-52c5-aa54-4a8f011feabd",
+      "name": "Gemini: Draft Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        340
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/{{ $env.GEMINI_MODEL || \"gemini-2.5-flash\" }}:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": []
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 300000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "smGeminiKey01",
+          "name": "SM Gemini API Key"
+        }
+      }
+    },
+    {
+      "id": "8466afa1-bd10-5baf-ac3a-b8a8a715489c",
+      "name": "Validate Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        170
+      ],
+      "parameters": {
+        "jsCode": "// Parse Gemini/AI structured output and enforce platform limits.\nconst { request, ...base } = $('Build AI Request').first().json;\nconst res = $input.first().json;\nconst fail = (reason) => [{ json: { ...base, ok: false, reason } }];\n\n// Gemini finish reasons\nconst candidate = res.candidates?.[0];\nif (candidate?.finishReason === 'SAFETY') return fail('the AI declined this brief due to safety filters. Try rephrasing it');\nif (candidate?.finishReason === 'MAX_TOKENS' || res.stop_reason === 'max_tokens') return fail('the draft was cut off. Try a shorter brief');\nif (res.stop_reason === 'refusal') return fail('the AI declined this brief. Try rephrasing it');\n\n// Extract text from Gemini candidates or standard response format\nconst textOutput =\n  candidate?.content?.parts?.[0]?.text ||\n  (res.content || []).find((b) => b.type === 'text')?.text ||\n  res.text ||\n  '';\n\nif (!textOutput) return fail('the AI returned an empty response');\n\nlet d;\ntry {\n  d = JSON.parse(textOutput);\n} catch (e) {\n  return fail('the AI returned malformed output');\n}\n\nconst IG_CAPTION_MAX = 2200;\nconst IG_HASHTAGS_MAX = 30;\nconst FB_CAPTION_MAX = 5000;\n\nconst clean = (s) => String(s || '').replace(/\\r\\n/g, '\\n').replace(/[ \\t]+\\n/g, '\\n').trim();\n\nconst fb = clean(d.facebook_caption).slice(0, FB_CAPTION_MAX);\nconst igBody = clean(String(d.instagram_caption || '').replace(/https?:\\/\\/\\S+/g, ''));\n\nconst tags = [...new Set(\n  [...base.brand_hashtags, ...(d.hashtags || [])]\n    .map((t) => '#' + String(t).replace(/^#+/, '').replace(/[^\\p{L}\\p{N}_]/gu, ''))\n    .filter((t) => t.length > 1),\n)].slice(0, IG_HASHTAGS_MAX);\n\n// Drop hashtags from the end until the caption fits; truncate the body only as a last resort.\nlet ig = igBody;\nfor (let n = tags.length; n >= 0; n--) {\n  ig = n ? `${igBody}\\n\\n${tags.slice(0, n).join(' ')}` : igBody;\n  if (ig.length <= IG_CAPTION_MAX) break;\n}\nif (ig.length > IG_CAPTION_MAX) ig = ig.slice(0, IG_CAPTION_MAX - 1) + '…';\n\nconst warnings = [];\nconst lower = `${fb}\\n${ig}`.toLowerCase();\nfor (const word of base.banned_words) {\n  if (word && lower.includes(word.toLowerCase())) warnings.push(`Contains a banned word: \"${word}\"`);\n}\nif (!fb) warnings.push('Facebook caption is empty');\nif (!igBody) warnings.push('Instagram caption is empty');\n\nreturn [{\n  json: {\n    ...base,\n    ok: true,\n    fb_caption: fb,\n    ig_caption: ig,\n    notes: clean(d.notes_for_client),\n    warnings,\n    model: res.modelVersion || res.model || 'gemini-2.5-flash',\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "ed28d95b-3f4e-5997-aeaa-d6613ce1cb63",
+      "name": "Draft OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1300,
+        170
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "424cc388-06c0-5634-a8d4-3b0b9f978f05",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3a688d5a-6528-5088-a0bd-3454d866ce87",
+      "name": "Save Draft Version",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1560,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH v AS (\n  INSERT INTO post_versions (post_id, version, fb_caption, ig_caption, feedback, model)\n  SELECT id, current_version + 1, $2, $3, NULLIF($4, ''), NULLIF($5, '')\n  FROM posts WHERE id = $1::uuid AND status = 'generating'\n  RETURNING post_id, version\n)\nUPDATE posts p SET status = 'pending_approval', current_version = v.version, error = NULL\nFROM v WHERE p.id = v.post_id\nRETURNING p.id AS post_id, p.current_version AS version;",
+        "options": {
+          "queryReplacement": "={{ [ $json.fb_caption, $json.ig_caption, $json.feedback || '', $json.model || '' ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "dda893bb-7984-518c-abff-51156664f9ba",
+      "name": "Build Preview",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Approval message + buttons. Plain text (no parse_mode) so captions never break formatting.\nconst d = $('Validate Draft').first().json;\nconst version = $input.first().json.version;\nconst platforms = d.platforms || [];\nconst id = d.post_id;\n\nconst label = { facebook: 'Facebook', instagram: 'Instagram' };\nconst parts = [\n  `📝 DRAFT v${version} · ${platforms.length ? platforms.map((p) => label[p] || p).join(' + ') : '⚠️ no platform available'}`,\n];\nif (platforms.includes('facebook')) parts.push(`📘 FACEBOOK\\n${d.fb_caption.slice(0, 1400)}`);\nif (platforms.includes('instagram')) parts.push(`📸 INSTAGRAM\\n${d.ig_caption}`);\nif (!d.source_media_url) parts.push('ℹ️ No photo attached, so Instagram is skipped. Send a photo with your brief to include Instagram.');\nif (d.notes) parts.push(`💡 ${d.notes}`);\nfor (const w of d.warnings) parts.push(`⚠️ ${w}`);\nparts.push('Nothing is posted until you tap 🚀 or schedule it.');\n\nlet text = parts.join('\\n\\n');\nif (text.length > 4096) text = text.slice(0, 4090) + '…';\n\nconst inline_keyboard = [];\nif (platforms.length) {\n  inline_keyboard.push([\n    { text: '🚀 Publish now', callback_data: `p:pub:${id}` },\n    { text: '🕒 Schedule', callback_data: `p:sch:${id}` },\n  ]);\n}\ninline_keyboard.push([\n  { text: '✏️ Edit', callback_data: `p:edt:${id}` },\n  { text: '🔁 Regenerate', callback_data: `p:rgn:${id}` },\n  { text: '❌ Discard', callback_data: `p:rej:${id}` },\n]);\n\nreturn [{\n  json: {\n    chat_id: d.chat_id,\n    text,\n    reply_markup: { inline_keyboard },\n    photo_url: d.source_media_url,\n    has_photo: !!d.source_media_url,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "06f1e7c3-3cf3-586c-ab17-7bb670e18fb7",
+      "name": "Preview Has Photo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2080,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c14a346b-c3e9-5651-abc2-852f6144a19a",
+              "leftValue": "={{ $json.has_photo }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fd1f4194-6a63-5b25-a311-600b298edd53",
+      "name": "Send Preview Photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2340,
+        -170
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendPhoto",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Preview').first().json.chat_id, photo: $('Build Preview').first().json.photo_url, caption: '🖼 Photo for this draft' }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "c508c09f-0001-500c-a9aa-4d932e1c8567",
+      "name": "Send Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Preview').first().json.chat_id, text: $('Build Preview').first().json.text, reply_markup: $('Build Preview').first().json.reply_markup, link_preview_options: { is_disabled: true } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "330f42b9-1392-5c45-aef4-6b2b21a17ae0",
+      "name": "AI Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        510
+      ],
+      "parameters": {
+        "jsCode": "// HTTP error from the Gemini/AI API (after node-level retries).\nconst { request, ...base } = $('Build AI Request').first().json;\nconst err = $input.first().json.error ?? {};\nconst message = typeof err === 'string' ? err : err.message || 'unknown error';\nreturn [{ json: { ...base, ok: false, reason: `the AI service failed (${String(message).slice(0, 200)})` } }];\n"
+      }
+    },
+    {
+      "id": "55739b92-8bb8-55c5-adbf-a36deef46abb",
+      "name": "Mark Draft Failed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1560,
+        510
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE posts SET status = 'draft_failed', error = $2\nWHERE id = $1::uuid\nRETURNING id AS post_id, $2::text AS reason, $3::bigint AS chat_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.reason, $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "d2ae1216-8c8e-5031-a6a0-4aaec24be057",
+      "name": "Notify Draft Failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1820,
+        510
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, text: \"⚠️ I couldn't create the draft: \" + $json.reason + '.\\n\\nPlease send your brief again.' }) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Load Post Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Post Context": {
+      "main": [
+        [
+          {
+            "node": "Build AI Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build AI Request": {
+      "main": [
+        [
+          {
+            "node": "Gemini: Draft Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini: Draft Post": {
+      "main": [
+        [
+          {
+            "node": "Validate Draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Draft": {
+      "main": [
+        [
+          {
+            "node": "Draft OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft OK?": {
+      "main": [
+        [
+          {
+            "node": "Save Draft Version",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Draft Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Error": {
+      "main": [
+        [
+          {
+            "node": "Mark Draft Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Draft Version": {
+      "main": [
+        [
+          {
+            "node": "Build Preview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Preview": {
+      "main": [
+        [
+          {
+            "node": "Preview Has Photo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preview Has Photo?": {
+      "main": [
+        [
+          {
+            "node": "Send Preview Photo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Preview Photo": {
+      "main": [
+        [
+          {
+            "node": "Send Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Draft Failed": {
+      "main": [
+        [
+          {
+            "node": "Notify Draft Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "smErrorHandler01",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

@@ -1,0 +1,1521 @@
+{
+  "id": "smRouter00000001",
+  "name": "SM · Telegram Router",
+  "nodes": [
+    {
+      "id": "139bf69e-329b-596b-af84-a02351591cc8",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        1360
+      ],
+      "webhookId": "d4ecc523-5dfa-53b2-af16-477aa984dd39",
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "smTelegramCred01",
+          "name": "SM Telegram Bot"
+        }
+      }
+    },
+    {
+      "id": "505abe7b-0e87-5761-a7f9-da70e578a1a9",
+      "name": "Normalize Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        1360
+      ],
+      "parameters": {
+        "jsCode": "// Flatten a Telegram update (message or button press) into one shape.\nconst update = $input.first().json;\nconst out = { update_id: update.update_id ?? null };\n\nif (update.callback_query) {\n  const cq = update.callback_query;\n  out.kind = 'callback';\n  out.chat_id = cq.message?.chat?.id ?? cq.from?.id ?? null;\n  out.from_id = cq.from?.id ?? null;\n  out.callback_id = cq.id;\n  out.callback_data = cq.data ?? '';\n  out.message_id = cq.message?.message_id ?? null;\n  out.text = '';\n  out.photo_file_id = null;\n} else {\n  const m = update.message ?? {};\n  const photos = m.photo ?? [];\n  out.chat_id = m.chat?.id ?? null;\n  out.from_id = m.from?.id ?? null;\n  out.message_id = m.message_id ?? null;\n  // Telegram sends several sizes; the last one is the largest.\n  out.photo_file_id = photos.length ? photos[photos.length - 1].file_id : null;\n  out.text = String(m.text ?? m.caption ?? '').trim();\n  if (out.photo_file_id) out.kind = 'photo';\n  else if (out.text.startsWith('/')) out.kind = 'command';\n  else if (out.text) out.kind = 'text';\n  else out.kind = 'unsupported';\n}\n\n// Updates without a chat (e.g. edited messages we did not subscribe to) are dropped.\nif (!out.chat_id) return [];\nreturn [{ json: out }];\n"
+      }
+    },
+    {
+      "id": "d7ae9810-af86-5153-ac16-a4812452d2c9",
+      "name": "Load Client",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        520,
+        1360
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id AS client_id, c.name AS client_name, c.timezone,\n       s.mode AS session_mode, s.post_id AS session_post_id,\n       ($1::text = NULLIF($2::text, '')) AS is_admin\nFROM (SELECT 1) AS one\nLEFT JOIN clients c ON c.telegram_chat_id = $1::bigint AND c.active\nLEFT JOIN chat_sessions s ON s.chat_id = c.telegram_chat_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.chat_id, $env.ADMIN_TELEGRAM_CHAT_ID || '' ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "b77ca2c5-8b53-51f2-adbe-7bd4ac2a4f45",
+      "name": "Build Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        1360
+      ],
+      "parameters": {
+        "jsCode": "// Merge the update with the client lookup and decide which branch handles it.\nconst update = $('Normalize Update').first().json;\nconst client = $input.first().json;\n\nconst ROUTES = [\n  'unauthorized', 'help', 'new_post', 'callback', 'edit_feedback',\n  'schedule_time', 'cancel', 'link_chat', 'login_link',\n];\n\nconst ctx = {\n  ...update,\n  client_id: client.client_id ?? null,\n  client_name: client.client_name ?? null,\n  is_admin: client.is_admin === true,\n  timezone: client.timezone ?? 'UTC',\n  session_mode: client.session_mode ?? null,\n  session_post_id: client.session_post_id ?? null,\n};\n\nlet cmd = null;\nlet arg = '';\nif (update.kind === 'command') {\n  cmd = update.text.split(/\\s+/)[0].split('@')[0].toLowerCase();\n  arg = update.text.replace(/^\\/\\S+\\s*/, '').trim();\n}\n\nlet route;\nif (cmd === '/start' && arg.startsWith('link_')) {\n  // Deep link from the dashboard signup page: t.me/<bot>?start=link_<code>\n  ctx.link_code = arg.slice('link_'.length);\n  route = 'link_chat';\n} else if (cmd === '/dashboard' || cmd === '/login' || (cmd === '/start' && arg === 'login')) {\n  route = ctx.client_id || ctx.is_admin ? 'login_link' : 'unauthorized';\n} else if (!ctx.client_id) {\n  route = 'unauthorized';\n} else if (update.kind === 'callback') {\n  route = 'callback';\n} else if (cmd) {\n  if (cmd === '/cancel') route = 'cancel';\n  else if ((cmd === '/new' || cmd === '/post') && arg) {\n    ctx.text = arg;\n    route = 'new_post';\n  } else route = 'help';\n} else if (update.kind === 'text' && ctx.session_mode === 'awaiting_edit') {\n  route = 'edit_feedback';\n} else if (update.kind === 'text' && ctx.session_mode === 'awaiting_schedule') {\n  route = 'schedule_time';\n} else if (update.kind === 'photo' || update.kind === 'text') {\n  route = 'new_post';\n} else {\n  route = 'help';\n}\n\nctx.route = route;\nctx.route_index = ROUTES.indexOf(route);\nreturn [{ json: ctx }];\n"
+      }
+    },
+    {
+      "id": "47977b21-11a2-5d5b-adea-2d31d8fe608d",
+      "name": "Route",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1040,
+        1360
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 9,
+        "output": "={{ $json.route_index }}"
+      }
+    },
+    {
+      "id": "497949c4-c0ae-5acc-afd0-be951f331c33",
+      "name": "Reply Unauthorized",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: \"This chat isn't connected to an account yet.\\n\\nCreate your account here, then tap the Telegram button it shows you:\\n\" + ($env.DASHBOARD_URL || '').replace(/\\/+$/, '') + \"/signup\\n\\n(Chat ID: \" + $('Build Context').first().json.chat_id + \")\" }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "51341b5f-839a-51a3-a64c-340bdb4cd367",
+      "name": "Reply Help",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        170
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: [\n    '👋 I draft your Facebook and Instagram posts. Nothing goes live until you approve it.',\n    'HOW TO START\\n• Send a photo (as a photo, not a file) with a caption describing the post\\n• Or send a text brief for a Facebook-only post',\n    'EXAMPLES\\n• [photo] Weekend promo: 20% off all pastries until Sunday\\n• Announce new opening hours, Mon-Sat 8am-8pm',\n    'Then use the buttons under the draft: 🚀 publish, 🕒 schedule, ✏️ edit, 🔁 regenerate or ❌ discard.',\n    'COMMANDS\\n/new <brief> - start a post\\n/dashboard - get a login link to see all your posts\\n/cancel - stop editing or scheduling'\n  ].join('\\n\\n') }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "04fc3073-664e-516c-a795-f0d087ddf30c",
+      "name": "Has Photo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1300,
+        510
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1cfef3ca-35da-59c8-a6ce-a64f6f27122e",
+              "leftValue": "={{ !!$json.photo_file_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "450e1f21-549a-5fb1-a051-c05ea9b2422e",
+      "name": "Media Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        340
+      ],
+      "parameters": {
+        "jsCode": "// Object-storage key for the client's photo. Telegram re-encodes photos as JPEG.\nconst ctx = $input.first().json;\nconst media_key = `posts/${ctx.client_id}/${Date.now()}-${ctx.message_id}.jpg`;\nreturn [{ json: { ...ctx, media_key } }];\n"
+      }
+    },
+    {
+      "id": "bac716a6-1c8d-53ed-a94c-6e195f2668cd",
+      "name": "Download Photo",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1820,
+        340
+      ],
+      "parameters": {
+        "resource": "file",
+        "operation": "get",
+        "fileId": "={{ $('Media Key').first().json.photo_file_id }}",
+        "download": true,
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "smTelegramCred01",
+          "name": "SM Telegram Bot"
+        }
+      }
+    },
+    {
+      "id": "4cceebb7-ba93-5747-a191-6b55c2605cde",
+      "name": "Upload Photo",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [
+        2080,
+        340
+      ],
+      "parameters": {
+        "resource": "file",
+        "operation": "upload",
+        "bucketName": "={{ $env.S3_BUCKET }}",
+        "fileName": "={{ $('Media Key').first().json.media_key }}",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "s3": {
+          "id": "smS3Storage00001",
+          "name": "SM Media Storage"
+        }
+      }
+    },
+    {
+      "id": "ac04ca34-a193-5486-adf1-97c08c8cd907",
+      "name": "Media Ready",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        340
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: $('Media Key').first().json }];"
+      }
+    },
+    {
+      "id": "dd73e380-1c99-5e8a-a924-fa113da9e35b",
+      "name": "Create Post",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2600,
+        510
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH c AS (\n  SELECT id, default_platforms FROM clients WHERE id = $1::uuid\n), s AS (\n  DELETE FROM chat_sessions WHERE chat_id = $4::bigint\n)\nINSERT INTO posts (client_id, brief, source_media_url, platforms, status)\nSELECT c.id, $2, NULLIF($3, ''),\n       CASE WHEN NULLIF($3, '') IS NULL THEN array_remove(c.default_platforms, 'instagram') ELSE c.default_platforms END,\n       'generating'\nFROM c\nRETURNING id AS post_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.client_id, $json.text, $json.media_key ? $env.MEDIA_PUBLIC_BASE_URL.replace(/\\/+$/, '') + '/' + $json.media_key : '', $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "ce65236a-1b76-56a0-abf4-3f685c4134dc",
+      "name": "Ack Drafting",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        340
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: \"✍️ Drafting your post. I'll send it here for approval in a moment.\" }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "b463e1a3-d57a-585c-aeeb-71c42004365e",
+      "name": "Generate Draft",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3120,
+        680
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "smGenerate000001",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      }
+    },
+    {
+      "id": "c3aaa071-4ff0-59a3-a43f-2b78e5122d60",
+      "name": "Answer Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        1360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ callback_query_id: $('Build Context').first().json.callback_id }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "66857600-28bf-5874-a622-836b3a48ff68",
+      "name": "Parse Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        1360
+      ],
+      "parameters": {
+        "jsCode": "// Button payloads look like \"p:<action>:<post uuid>\".\nconst ctx = $('Build Context').first().json;\nconst [prefix, action, postId] = String(ctx.callback_data).split(':');\nconst valid = prefix === 'p' && /^[0-9a-f-]{36}$/i.test(postId ?? '');\n\nreturn [{\n  json: {\n    ...ctx,\n    action: valid ? action : 'invalid',\n    // Placeholder keeps the ::uuid cast in the next query from failing.\n    post_id: valid ? postId : '00000000-0000-0000-0000-000000000000',\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "aa01011a-b8c4-58af-ac8c-91056c5ffa65",
+      "name": "Load Post For Action",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1820,
+        1360
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id AS post_id, status FROM posts WHERE id = $1::uuid AND client_id = $2::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.client_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "d132e697-25b5-57dd-a468-ca05cc1e0de5",
+      "name": "Decide Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        1360
+      ],
+      "parameters": {
+        "jsCode": "// Only allow a button if the post is still in a state where it makes sense.\nconst ctx = $('Parse Callback').first().json;\nconst post = $input.first().json;\n\nconst ACTIONS = ['pub', 'sch', 'edt', 'rgn', 'rej', 'rty', 'stale'];\nconst ALLOWED_FROM = {\n  pub: ['pending_approval', 'scheduled'],\n  sch: ['pending_approval', 'scheduled'],\n  edt: ['pending_approval'],\n  rgn: ['pending_approval'],\n  rej: ['pending_approval', 'scheduled'],\n  rty: ['failed', 'partially_published'],\n};\n\nlet action = ctx.action;\nif (!post.post_id || !ALLOWED_FROM[action]?.includes(post.status)) action = 'stale';\n\nreturn [{\n  json: {\n    ...ctx,\n    post_status: post.status ?? 'missing',\n    action,\n    action_index: ACTIONS.indexOf(action),\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "52a5cf9c-4494-5e04-a67d-737f71cffe7b",
+      "name": "Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2340,
+        1360
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 7,
+        "output": "={{ $json.action_index }}"
+      }
+    },
+    {
+      "id": "cceb9c7f-ed30-5125-ae32-9d10931b2d8f",
+      "name": "Approve Now",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2600,
+        850
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (\n  DELETE FROM chat_sessions WHERE post_id = $1::uuid\n), upd AS (\n  UPDATE posts SET status = 'approved', approved_at = now(), publish_at = NULL\n  WHERE id = $1::uuid AND client_id = $2::uuid AND status IN ('pending_approval', 'scheduled')\n  RETURNING id, client_id\n), audit AS (\n  INSERT INTO audit_log (client_id, post_id, actor_chat_id, action)\n  SELECT client_id, id, $3::bigint, 'approved_publish_now' FROM upd\n)\nSELECT id AS post_id FROM upd;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.client_id, $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "cbb4e002-b630-58e9-abf0-e7ca39bf6837",
+      "name": "Ack Publishing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        850
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: '🚀 Publishing now…' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "307bdf77-d8af-5aed-abe1-a1cdf3103742",
+      "name": "Publish Post",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3120,
+        1020
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "smPublish0000001",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      }
+    },
+    {
+      "id": "c0b832bb-99a6-5632-abbf-27224a5a9cb4",
+      "name": "Await Schedule Time",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2600,
+        1190
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO chat_sessions (chat_id, mode, post_id)\nVALUES ($3::bigint, 'awaiting_schedule', $1::uuid)\nON CONFLICT (chat_id) DO UPDATE SET mode = EXCLUDED.mode, post_id = EXCLUDED.post_id, updated_at = now()\nRETURNING chat_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.client_id, $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "91245cb3-0df3-5824-a006-d711fb7e6350",
+      "name": "Ask Schedule Time",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        1190
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: '🕒 When should it go out? Reply with a time, for example:\\n• 18:30 (today, or tomorrow if that has passed)\\n• tomorrow 9am\\n• 2026-12-24 18:00\\n• +2h\\n\\nTimezone: ' + $('Build Context').first().json.timezone + '\\n/cancel to stop.' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "01928d66-4b7e-568c-ac9f-f45b6687ddba",
+      "name": "Await Edit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2600,
+        1530
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO chat_sessions (chat_id, mode, post_id)\nVALUES ($3::bigint, 'awaiting_edit', $1::uuid)\nON CONFLICT (chat_id) DO UPDATE SET mode = EXCLUDED.mode, post_id = EXCLUDED.post_id, updated_at = now()\nRETURNING chat_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.client_id, $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "9f783f3d-9160-5ba2-a34d-121d675896fd",
+      "name": "Ask For Changes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        1530
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: '✏️ What should I change? Reply in your own words, e.g. \"shorter, mention free delivery, fewer emojis\".\\n/cancel to stop.' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "ab530559-1dd5-58db-a429-b7b451a5be53",
+      "name": "Start Regenerate",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2600,
+        1870
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (\n  DELETE FROM chat_sessions WHERE post_id = $1::uuid\n)\nUPDATE posts SET status = 'generating'\nWHERE id = $1::uuid AND client_id = $2::uuid AND status = 'pending_approval'\nRETURNING id AS post_id,\n  'Write a fresh alternative with a different hook and angle. Do not reuse the previous wording.'::text AS feedback;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.client_id, $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "d92c4f7d-f008-5cc4-a556-bd73cabdcd05",
+      "name": "Ack Regenerate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        1870
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: '🔁 Writing a fresh version…' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "954894c0-d65c-5982-ae56-5b6e501e5459",
+      "name": "Reject Post",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2600,
+        2210
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (\n  DELETE FROM chat_sessions WHERE post_id = $1::uuid\n), upd AS (\n  UPDATE posts SET status = 'rejected', publish_at = NULL\n  WHERE id = $1::uuid AND client_id = $2::uuid AND status IN ('pending_approval', 'scheduled')\n  RETURNING id, client_id\n), audit AS (\n  INSERT INTO audit_log (client_id, post_id, actor_chat_id, action)\n  SELECT client_id, id, $3::bigint, 'rejected' FROM upd\n)\nSELECT id AS post_id FROM upd;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.client_id, $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "3c0d0726-7f9c-5b83-a387-7bdb2755ee7c",
+      "name": "Ack Rejected",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        2210
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: '🗑 Draft discarded.' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "ada7a412-3b30-5643-aa76-8429f1018fb7",
+      "name": "Retry Publish",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2600,
+        2550
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH upd AS (\n  UPDATE posts SET status = 'approved', error = NULL\n  WHERE id = $1::uuid AND client_id = $2::uuid AND status IN ('failed', 'partially_published')\n  RETURNING id, client_id\n), audit AS (\n  INSERT INTO audit_log (client_id, post_id, actor_chat_id, action)\n  SELECT client_id, id, $3::bigint, 'retry_publish' FROM upd\n)\nSELECT id AS post_id FROM upd;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.client_id, $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "9e346580-204b-574e-a05d-40e0ea6e0e82",
+      "name": "Ack Retry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        2550
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: '🔁 Retrying…' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "799e563f-92d7-5c1e-a78b-7eb122cdbc7d",
+      "name": "Reply Stale",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        2890
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: 'That button is no longer active (post is ' + String($json.post_status).replace(/_/g, ' ') + ').' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "bd8585ad-99c2-5b4b-a930-b089dc7e5644",
+      "name": "Remove Buttons",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3120,
+        2040
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageReplyMarkup",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, message_id: $('Build Context').first().json.message_id, reply_markup: { inline_keyboard: [] } }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "1ee8b9f0-7536-565e-af55-f8036973b09c",
+      "name": "Start Revision",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1300,
+        3230
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH cleared AS (\n  DELETE FROM chat_sessions WHERE chat_id = $1::bigint RETURNING post_id\n)\nUPDATE posts p SET status = 'generating'\nFROM cleared\nWHERE p.id = cleared.post_id AND p.status = 'pending_approval'\nRETURNING p.id AS post_id, $2::text AS feedback;",
+        "options": {
+          "queryReplacement": "={{ [ $json.chat_id, $json.text ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "8f35cb45-b447-52f8-ad6b-679d83589ee5",
+      "name": "Ack Revision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        3230
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: '✏️ Revising the draft…' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "49bbf536-8a2f-567a-ab9d-2a786de0b573",
+      "name": "Parse Schedule Time",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        3570
+      ],
+      "parameters": {
+        "jsCode": "// Parse a human schedule reply in the client's timezone.\n// Accepts: \"18:30\", \"6pm\", \"tomorrow 9am\", \"today 17:00\", \"2026-12-24 18:00\", \"+2h\", \"+30m\", \"+1d\".\nconst ctx = $('Build Context').first().json;\nconst zone = ctx.timezone || 'UTC';\nconst raw = String(ctx.text || '').trim().toLowerCase();\nconst now = DateTime.now().setZone(zone);\n\nlet when = null;\nlet m;\n\nif ((m = raw.match(/^\\+\\s*(\\d+)\\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)$/))) {\n  const n = Number(m[1]);\n  const unit = m[2][0];\n  when = now.plus(unit === 'm' ? { minutes: n } : unit === 'h' ? { hours: n } : { days: n });\n} else if ((m = raw.match(/^(\\d{4}-\\d{2}-\\d{2})[ t](\\d{1,2}):(\\d{2})$/))) {\n  when = DateTime.fromISO(`${m[1]}T${m[2].padStart(2, '0')}:${m[3]}`, { zone });\n} else if ((m = raw.match(/^(today|tomorrow)?\\s*(?:at\\s*)?(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?$/))) {\n  const [, day, h, min, ampm] = m;\n  let hour = Number(h);\n  const minute = Number(min ?? 0);\n  if (ampm === 'pm' && hour < 12) hour += 12;\n  if (ampm === 'am' && hour === 12) hour = 0;\n  // A bare number like \"18\" is too ambiguous; require minutes, am/pm or a day word.\n  const specific = min !== undefined || ampm || day;\n  if (specific && hour <= 23 && minute <= 59) {\n    when = now.set({ hour, minute, second: 0, millisecond: 0 });\n    if (day === 'tomorrow') when = when.plus({ days: 1 });\n    else if (!day && when <= now) when = when.plus({ days: 1 });\n  }\n}\n\nlet reason = null;\nif (!when || !when.isValid) reason = 'format not recognised';\nelse if (when < now.plus({ minutes: 1 })) reason = 'that time is in the past';\nelse if (when > now.plus({ days: 90 })) reason = 'that is more than 90 days away';\n\nreturn [{\n  json: {\n    chat_id: ctx.chat_id,\n    ok: !reason,\n    reason,\n    publish_at: reason ? null : when.toUTC().toISO(),\n    local_label: reason ? null : `${when.toFormat('ccc d LLL yyyy, HH:mm')} (${zone})`,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "36af233b-44cb-53cb-a302-6d28b2dadf8e",
+      "name": "Time Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1560,
+        3570
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "94c83324-0f8d-5e69-ab91-30587b8a9c6e",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "6329d50c-cf6f-572d-a7af-57bd58bede5f",
+      "name": "Schedule Post",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1820,
+        3400
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH cleared AS (\n  DELETE FROM chat_sessions WHERE chat_id = $1::bigint RETURNING post_id\n), upd AS (\n  UPDATE posts p SET status = 'scheduled', publish_at = $2::timestamptz, approved_at = now()\n  FROM cleared\n  WHERE p.id = cleared.post_id AND p.status IN ('pending_approval', 'scheduled')\n  RETURNING p.id, p.client_id\n), audit AS (\n  INSERT INTO audit_log (client_id, post_id, actor_chat_id, action, detail)\n  SELECT client_id, id, $1::bigint, 'approved_scheduled', jsonb_build_object('publish_at', $2::text) FROM upd\n)\nSELECT id AS post_id FROM upd;",
+        "options": {
+          "queryReplacement": "={{ [ $json.chat_id, $json.publish_at ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "b0403f70-38ce-5e09-a91a-fe8f24d854dd",
+      "name": "Confirm Schedule",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2080,
+        3400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: '✅ Scheduled for ' + $('Parse Schedule Time').first().json.local_label + '.\\n\\nTap 🚀 Publish now on the draft to post sooner, or ❌ Discard to cancel it.' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "04de504a-45db-5b72-ac8a-fcced12249d1",
+      "name": "Reply Bad Time",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1820,
+        3740
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: \"I couldn't use that time: \" + $json.reason + '.\\n\\nTry 18:30, tomorrow 9am, 2026-12-24 18:00 or +2h.\\n/cancel to stop.' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "e3b04711-2699-5d55-ac4e-f46135d61e20",
+      "name": "Clear Session",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1300,
+        4080
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM chat_sessions WHERE chat_id = $1::bigint;",
+        "options": {
+          "queryReplacement": "={{ [ $json.chat_id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "620d81c4-98a1-59a2-a8d8-6655067f4f95",
+      "name": "Reply Cancelled",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        4080
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: \"Okay, cancelled. The buttons on your last draft still work.\" }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "d4c5cee7-d4f1-5b1a-afe0-9e1c3b8329f5",
+      "name": "Link Chat",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1300,
+        4420
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH linked AS (\n  UPDATE clients SET telegram_chat_id = $1::bigint, telegram_link_code = NULL\n  WHERE telegram_link_code = $2\n    AND NOT EXISTS (SELECT 1 FROM clients WHERE telegram_chat_id = $1::bigint)\n  RETURNING id, name\n), tok AS (\n  SELECT encode(gen_random_bytes(24), 'hex') AS token\n), ins AS (\n  INSERT INTO login_tokens (token_hash, client_id, chat_id, expires_at)\n  SELECT digest(tok.token, 'sha256'), linked.id, $1::bigint, now() + interval '15 minutes'\n  FROM linked CROSS JOIN tok\n)\nSELECT linked.name AS client_name, tok.token FROM linked CROSS JOIN tok;",
+        "options": {
+          "queryReplacement": "={{ [ $json.chat_id, $json.link_code || '' ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "592a4bb3-d5df-5879-ad2f-14053daa926c",
+      "name": "Linked?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1560,
+        4420
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7b8912e4-fad6-5c68-ada1-13e5475f8727",
+              "leftValue": "={{ !!$json.token }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "64a0e208-13fb-5e24-ab85-799f371faef7",
+      "name": "Reply Linked",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1820,
+        4250
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n    chat_id: $('Build Context').first().json.chat_id,\n    text: '✅ This chat is now connected to ' + $json.client_name + '.\\n\\nNext, open your dashboard to connect your Facebook Page and fill in your brand profile. After that, just send me a photo with a short brief whenever you want a post.',\n    reply_markup: { inline_keyboard: [[{ text: '📊 Open dashboard', url: ($env.DASHBOARD_URL || '').replace(/\\/+$/, '') + '/auth/telegram?token=' + $json.token }]] }\n  }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "7a7d9c80-c4fe-52c5-aee8-f88fdfb97b22",
+      "name": "Reply Link Invalid",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1820,
+        4590
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Build Context').first().json.chat_id, text: 'That link is invalid or was already used, or this chat is already connected. Send /dashboard to log in.' }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "3359e858-33c4-5b63-ad9b-42fc25185d5e",
+      "name": "Create Login Token",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1300,
+        4930
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH tok AS (\n  SELECT encode(gen_random_bytes(24), 'hex') AS token\n), ins AS (\n  INSERT INTO login_tokens (token_hash, client_id, chat_id, is_admin, expires_at)\n  SELECT digest(token, 'sha256'), $1::uuid, $2::bigint, $3::boolean, now() + interval '15 minutes'\n  FROM tok\n)\nSELECT token FROM tok;",
+        "options": {
+          "queryReplacement": "={{ [ $json.client_id || null, $json.chat_id, !!$json.is_admin ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "424cb436-87db-517e-a87d-e60fa683322b",
+      "name": "Send Login Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        4930
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n    chat_id: $('Build Context').first().json.chat_id,\n    text: '🔐 Your dashboard login link. It works once and expires in 15 minutes.',\n    reply_markup: { inline_keyboard: [[{ text: '📊 Open dashboard', url: ($env.DASHBOARD_URL || '').replace(/\\/+$/, '') + '/auth/telegram?token=' + $json.token }]] }\n  }) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Update": {
+      "main": [
+        [
+          {
+            "node": "Load Client",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Client": {
+      "main": [
+        [
+          {
+            "node": "Build Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Context": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "Reply Unauthorized",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Help",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Has Photo?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Answer Callback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Start Revision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Schedule Time",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Clear Session",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Link Chat",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Login Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Photo?": {
+      "main": [
+        [
+          {
+            "node": "Media Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Media Key": {
+      "main": [
+        [
+          {
+            "node": "Download Photo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Photo": {
+      "main": [
+        [
+          {
+            "node": "Upload Photo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Photo": {
+      "main": [
+        [
+          {
+            "node": "Media Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Media Ready": {
+      "main": [
+        [
+          {
+            "node": "Create Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Post": {
+      "main": [
+        [
+          {
+            "node": "Ack Drafting",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Generate Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Callback": {
+      "main": [
+        [
+          {
+            "node": "Parse Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Callback": {
+      "main": [
+        [
+          {
+            "node": "Load Post For Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Post For Action": {
+      "main": [
+        [
+          {
+            "node": "Decide Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Action": {
+      "main": [
+        [
+          {
+            "node": "Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action": {
+      "main": [
+        [
+          {
+            "node": "Approve Now",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Await Schedule Time",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Await Edit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Start Regenerate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject Post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry Publish",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Stale",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve Now": {
+      "main": [
+        [
+          {
+            "node": "Ack Publishing",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Publish Post",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Remove Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Await Schedule Time": {
+      "main": [
+        [
+          {
+            "node": "Ask Schedule Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Await Edit": {
+      "main": [
+        [
+          {
+            "node": "Ask For Changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Regenerate": {
+      "main": [
+        [
+          {
+            "node": "Ack Regenerate",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Generate Draft",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Remove Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject Post": {
+      "main": [
+        [
+          {
+            "node": "Ack Rejected",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Remove Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Publish": {
+      "main": [
+        [
+          {
+            "node": "Ack Retry",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Publish Post",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Remove Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Revision": {
+      "main": [
+        [
+          {
+            "node": "Ack Revision",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Generate Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Schedule Time": {
+      "main": [
+        [
+          {
+            "node": "Time Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Time Valid?": {
+      "main": [
+        [
+          {
+            "node": "Schedule Post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Bad Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Post": {
+      "main": [
+        [
+          {
+            "node": "Confirm Schedule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Session": {
+      "main": [
+        [
+          {
+            "node": "Reply Cancelled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Link Chat": {
+      "main": [
+        [
+          {
+            "node": "Linked?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Linked?": {
+      "main": [
+        [
+          {
+            "node": "Reply Linked",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Link Invalid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Login Token": {
+      "main": [
+        [
+          {
+            "node": "Send Login Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "smErrorHandler01",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

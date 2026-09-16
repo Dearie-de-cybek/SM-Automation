@@ -1,0 +1,790 @@
+{
+  "id": "smPublish0000001",
+  "name": "SM · Publish Post",
+  "nodes": [
+    {
+      "id": "e81562e6-4c4e-5603-aa74-e9d76978975f",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        510
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "fb30e53d-7c66-504f-a95f-1cff6bb69b33",
+      "name": "Claim Post",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        260,
+        510
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH claimed AS (\n  UPDATE posts SET status = 'publishing', attempts = attempts + 1, error = NULL\n  WHERE id = $1::uuid AND status IN ('approved', 'scheduled')\n  RETURNING *\n)\nSELECT cl.id AS post_id, cl.platforms, cl.source_media_url,\n       cl.fb_post_id, cl.fb_permalink, cl.ig_media_id, cl.ig_permalink,\n       v.fb_caption, v.ig_caption,\n       c.telegram_chat_id AS chat_id, c.fb_page_id, c.ig_user_id,\n       CASE WHEN c.meta_token_enc IS NULL THEN NULL ELSE pgp_sym_decrypt(c.meta_token_enc, $2) END AS access_token\nFROM claimed cl\nJOIN clients c ON c.id = cl.client_id\nLEFT JOIN post_versions v ON v.post_id = cl.id AND v.version = cl.current_version;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $env.TOKEN_ENCRYPTION_KEY ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "c767266c-a3cc-5674-a844-60d70431f45f",
+      "name": "Plan Publish",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        510
+      ],
+      "parameters": {
+        "jsCode": "// Decide what to publish where. Platforms that already have a post ID are skipped, so a retry never double-posts.\nconst p = $input.first().json;\nconst wanted = p.platforms || [];\n\nconst s = {\n  post_id: p.post_id,\n  chat_id: p.chat_id,\n  access_token: p.access_token,\n  media_url: p.source_media_url || null,\n  fb_caption: p.fb_caption || '',\n  ig_caption: p.ig_caption || '',\n  fb_page_id: p.fb_page_id,\n  ig_user_id: p.ig_user_id,\n  fb: { wanted: wanted.includes('facebook'), post_id: p.fb_post_id, permalink: p.fb_permalink, error: null },\n  ig: { wanted: wanted.includes('instagram'), media_id: p.ig_media_id, permalink: p.ig_permalink, container_id: null, error: null },\n};\n\nif (s.fb.wanted && !s.fb.post_id) {\n  if (!p.access_token) s.fb.error = 'Meta access token is missing for this client.';\n  else if (!p.fb_page_id) s.fb.error = 'Facebook Page ID is not configured.';\n}\nif (s.ig.wanted && !s.ig.media_id) {\n  if (!p.access_token) s.ig.error = 'Meta access token is missing for this client.';\n  else if (!p.ig_user_id) s.ig.error = 'Instagram account ID is not configured.';\n  else if (!s.media_url) s.ig.error = 'Instagram posts need a photo.';\n}\n\ns.do_fb = s.fb.wanted && !s.fb.post_id && !s.fb.error;\ns.do_ig = s.ig.wanted && !s.ig.media_id && !s.ig.error;\n\ns.fb_request = s.media_url\n  ? { path: `${p.fb_page_id}/photos`, body: { url: s.media_url, caption: s.fb_caption, published: true } }\n  : { path: `${p.fb_page_id}/feed`, body: { message: s.fb_caption } };\n\nreturn [{ json: s }];\n"
+      }
+    },
+    {
+      "id": "a8c48b4e-f5bd-5881-af24-2700b287d178",
+      "name": "Publish to Facebook?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        780,
+        510
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "f9d22dfb-fae2-5053-a009-ee3578437887",
+              "leftValue": "={{ $json.do_fb }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "bffd4bc0-2ae3-5f40-ac9f-9ced8e88dff3",
+      "name": "FB: Publish",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        340
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v24.0' }}/{{ $json.fb_request.path }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.fb_request.body) }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "145490f0-6c50-59a7-a22d-450e6db5ced4",
+      "name": "FB Done",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        170
+      ],
+      "parameters": {
+        "jsCode": "const s = $('Plan Publish').first().json;\nconst res = $input.first().json;\n// /photos returns { id: photoId, post_id }, /feed returns { id: \"<page>_<post>\" }.\nconst postId = res.post_id || res.id;\nreturn [{ json: { ...s, fb: { ...s.fb, post_id: postId, permalink: `https://www.facebook.com/${postId}` } } }];\n"
+      }
+    },
+    {
+      "id": "28711aa3-6825-548c-ab8b-9c6e8d5c6d6d",
+      "name": "FB Failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        510
+      ],
+      "parameters": {
+        "jsCode": "// Pull a readable message out of an HTTP Request node error item (Graph API errors are JSON inside the text).\nfunction metaError(item) {\n  const e = item?.error ?? item ?? {};\n  const raw = typeof e === 'string' ? e : [e.message, e.description].filter(Boolean).join(' ');\n  const m = raw.match(/\"message\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"/);\n  return (m ? m[1] : raw || 'Unknown error').slice(0, 500);\n}\nconst s = $('Plan Publish').first().json;\nreturn [{ json: { ...s, fb: { ...s.fb, error: metaError($input.first().json) } } }];\n"
+      }
+    },
+    {
+      "id": "262bc9a9-dc22-50e2-a743-915f1116cff5",
+      "name": "Prep IG",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        510
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: $input.first().json }];"
+      }
+    },
+    {
+      "id": "d20d48cb-62ba-5161-a749-9519e652e83e",
+      "name": "Publish to Instagram?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1820,
+        510
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1b24a18b-d3b7-570a-a017-4a1aa38b41c9",
+              "leftValue": "={{ $json.do_ig }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "88a9b439-4b73-58e2-ad97-46085c5adc41",
+      "name": "IG: Create Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2080,
+        340
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v24.0' }}/{{ $json.ig_user_id }}/media",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ image_url: $json.media_url, caption: $json.ig_caption }) }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "3703effb-022a-5566-ad99-61ccb0da3bdb",
+      "name": "Wait For Processing",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2340,
+        340
+      ],
+      "webhookId": "5f64818d-2e88-556a-ab3a-1d64e8395cc2",
+      "parameters": {
+        "amount": 3,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "c07aae97-0515-5562-ab6b-25765579959d",
+      "name": "IG: Check Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        340
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v24.0' }}/{{ $('IG: Create Container').first().json.id }}?fields=status_code,status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Prep IG').first().json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "d93eef23-99ae-5e7a-af22-dd0ad7389efe",
+      "name": "Eval Container",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2860,
+        340
+      ],
+      "parameters": {
+        "jsCode": "// Instagram processes the image asynchronously; publish only once the container is FINISHED.\nconst MAX_POLLS = 20;\nconst s = $('Prep IG').first().json;\nconst status = $input.first().json;\nconst polls = $runIndex + 1;\n\nlet route = 1; // 0 = ready, 1 = wait and poll again, 2 = failed\nlet ig_error = null;\nif (status.status_code === 'FINISHED') route = 0;\nelse if (status.status_code === 'ERROR' || status.status_code === 'EXPIRED') {\n  route = 2;\n  ig_error = `Instagram could not process the image (${status.status || status.status_code}).`;\n} else if (polls >= MAX_POLLS) {\n  route = 2;\n  ig_error = 'Instagram took too long to process the image.';\n}\n\nreturn [{ json: { ...s, route, ig_error } }];\n"
+      }
+    },
+    {
+      "id": "229d8875-3ac1-558e-a536-41662a138e58",
+      "name": "Container Ready?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        3120,
+        340
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 3,
+        "output": "={{ $json.route }}"
+      }
+    },
+    {
+      "id": "d641166d-0786-5174-a22e-f1d9ae1e51b0",
+      "name": "IG: Publish",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3380,
+        170
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v24.0' }}/{{ $('Prep IG').first().json.ig_user_id }}/media_publish",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Prep IG').first().json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ creation_id: $('IG: Create Container').first().json.id }) }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "c1816a75-b47d-5ccd-abd4-0b8fbd19c4f0",
+      "name": "IG: Get Permalink",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3640,
+        170
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v24.0' }}/{{ $json.id }}?fields=permalink",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Prep IG').first().json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "79bb483a-58a3-5c69-a147-43c69424aefe",
+      "name": "IG Done",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3900,
+        170
+      ],
+      "parameters": {
+        "jsCode": "const s = $('Prep IG').first().json;\nconst mediaId = $('IG: Publish').first().json.id;\nconst permalink = $input.first().json.permalink || null;\nconst containerId = $('IG: Create Container').first().json.id;\nreturn [{ json: { ...s, ig: { ...s.ig, media_id: mediaId, permalink, container_id: containerId } } }];\n"
+      }
+    },
+    {
+      "id": "70f1e4d6-b6b1-5528-a12f-37b41782a4eb",
+      "name": "IG Failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3640,
+        680
+      ],
+      "parameters": {
+        "jsCode": "// Pull a readable message out of an HTTP Request node error item (Graph API errors are JSON inside the text).\nfunction metaError(item) {\n  const e = item?.error ?? item ?? {};\n  const raw = typeof e === 'string' ? e : [e.message, e.description].filter(Boolean).join(' ');\n  const m = raw.match(/\"message\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"/);\n  return (m ? m[1] : raw || 'Unknown error').slice(0, 500);\n}\nconst s = $('Prep IG').first().json;\nconst item = $input.first().json;\n\nlet containerId = null;\ntry {\n  containerId = $('IG: Create Container').first().json.id ?? null;\n} catch (e) {\n  // Container step did not run.\n}\n\nlet error = item.ig_error || metaError(item);\nif (/aspect ratio/i.test(error)) {\n  error += ' Instagram only accepts images between 4:5 (portrait) and 1.91:1 (landscape). Crop the photo and send the brief again.';\n}\n\nreturn [{ json: { ...s, ig: { ...s.ig, error, container_id: containerId } } }];\n"
+      }
+    },
+    {
+      "id": "63efcda7-3e7b-5c8b-a314-48279e45cc74",
+      "name": "Summarize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4160,
+        510
+      ],
+      "parameters": {
+        "jsCode": "// Final status + message for the client. The access token is deliberately left out from here on.\nconst s = $input.first().json;\nconst { fb, ig } = s;\n\nconst fbOk = !fb.wanted || !!fb.post_id;\nconst igOk = !ig.wanted || !!ig.media_id;\nconst anyOk = (fb.wanted && !!fb.post_id) || (ig.wanted && !!ig.media_id);\nconst nothingWanted = !fb.wanted && !ig.wanted;\n\nconst status = nothingWanted ? 'failed' : fbOk && igOk ? 'published' : anyOk ? 'partially_published' : 'failed';\n\nconst lines = [\n  status === 'published' ? '✅ Published!' : status === 'partially_published' ? '⚠️ Partly published' : '❌ Publishing failed',\n];\nif (nothingWanted) lines.push('No platform was selected for this post.');\nif (fb.wanted) lines.push(fb.post_id ? `📘 Facebook: ${fb.permalink}` : `📘 Facebook failed: ${fb.error || 'unknown error'}`);\nif (ig.wanted) {\n  lines.push(ig.media_id ? `📸 Instagram: ${ig.permalink || 'posted (link unavailable)'}` : `📸 Instagram failed: ${ig.error || 'unknown error'}`);\n}\nif (status !== 'published') lines.push('Fix the issue, then tap 🔁 Retry. Anything already posted will not be posted twice.');\n\nconst errors = [fb.error && `facebook: ${fb.error}`, ig.error && `instagram: ${ig.error}`].filter(Boolean).join(' | ');\n\nreturn [{\n  json: {\n    post_id: s.post_id,\n    chat_id: s.chat_id,\n    status,\n    fb_post_id: fb.post_id || '',\n    fb_permalink: fb.permalink || '',\n    ig_media_id: ig.media_id || '',\n    ig_permalink: ig.permalink || '',\n    ig_container_id: ig.container_id || '',\n    error: status === 'published' ? '' : errors || 'No platform selected',\n    text: lines.join('\\n\\n'),\n    reply_markup: status === 'published'\n      ? undefined\n      : { inline_keyboard: [[{ text: '🔁 Retry', callback_data: `p:rty:${s.post_id}` }]] },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "2da8f945-fa24-5a5b-a56b-4c2a76bd7071",
+      "name": "Save Result",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4420,
+        510
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH upd AS (\n  UPDATE posts SET\n    status = $2,\n    fb_post_id = NULLIF($3, ''), fb_permalink = NULLIF($4, ''),\n    ig_media_id = NULLIF($5, ''), ig_permalink = NULLIF($6, ''),\n    ig_container_id = COALESCE(NULLIF($7, ''), ig_container_id),\n    error = NULLIF($8, ''),\n    published_at = CASE WHEN $2 IN ('published', 'partially_published') THEN COALESCE(published_at, now()) ELSE published_at END\n  WHERE id = $1::uuid\n  RETURNING id, client_id\n)\nINSERT INTO audit_log (client_id, post_id, action, detail)\nSELECT client_id, id, 'publish_' || $2, jsonb_build_object('error', NULLIF($8, '')) FROM upd\nRETURNING post_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.post_id, $json.status, $json.fb_post_id, $json.fb_permalink, $json.ig_media_id, $json.ig_permalink, $json.ig_container_id, $json.error ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "ddfef8c1-28b6-5fdf-a084-e79fc81b7194",
+      "name": "Notify Client",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4680,
+        340
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Summarize').first().json.chat_id, text: $('Summarize').first().json.text, reply_markup: $('Summarize').first().json.reply_markup, link_preview_options: { is_disabled: true } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "ed7b4185-d4d4-5a9d-adad-f5b4281ebe88",
+      "name": "Alert Admin?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4680,
+        680
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b48bc6e6-4fd5-587a-aa15-7761a2a03eed",
+              "leftValue": "={{ $('Summarize').first().json.status !== 'published' && !!$env.ADMIN_TELEGRAM_CHAT_ID }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "966e4de0-433e-58a6-a721-c38d8bb3617c",
+      "name": "Alert Admin",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4940,
+        680
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $env.ADMIN_TELEGRAM_CHAT_ID, text: '⚠️ Publish problem, post ' + $('Summarize').first().json.post_id + '\\n\\n' + $('Summarize').first().json.text }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Claim Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Post": {
+      "main": [
+        [
+          {
+            "node": "Plan Publish",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Publish": {
+      "main": [
+        [
+          {
+            "node": "Publish to Facebook?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish to Facebook?": {
+      "main": [
+        [
+          {
+            "node": "FB: Publish",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prep IG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FB: Publish": {
+      "main": [
+        [
+          {
+            "node": "FB Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "FB Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FB Done": {
+      "main": [
+        [
+          {
+            "node": "Prep IG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FB Failed": {
+      "main": [
+        [
+          {
+            "node": "Prep IG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep IG": {
+      "main": [
+        [
+          {
+            "node": "Publish to Instagram?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish to Instagram?": {
+      "main": [
+        [
+          {
+            "node": "IG: Create Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Summarize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG: Create Container": {
+      "main": [
+        [
+          {
+            "node": "Wait For Processing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IG Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait For Processing": {
+      "main": [
+        [
+          {
+            "node": "IG: Check Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG: Check Status": {
+      "main": [
+        [
+          {
+            "node": "Eval Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IG Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eval Container": {
+      "main": [
+        [
+          {
+            "node": "Container Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Container Ready?": {
+      "main": [
+        [
+          {
+            "node": "IG: Publish",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait For Processing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IG Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG: Publish": {
+      "main": [
+        [
+          {
+            "node": "IG: Get Permalink",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IG Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG: Get Permalink": {
+      "main": [
+        [
+          {
+            "node": "IG Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG Done": {
+      "main": [
+        [
+          {
+            "node": "Summarize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG Failed": {
+      "main": [
+        [
+          {
+            "node": "Summarize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize": {
+      "main": [
+        [
+          {
+            "node": "Save Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Result": {
+      "main": [
+        [
+          {
+            "node": "Notify Client",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Alert Admin?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Admin?": {
+      "main": [
+        [
+          {
+            "node": "Alert Admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "smErrorHandler01",
+    "callerPolicy": "workflowsFromSameOwner",
+    "saveDataSuccessExecution": "none"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

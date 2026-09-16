@@ -1,0 +1,24 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+npm-debug.log*
+
+# Next.js build output
+.next/
+dashboard/.next/
+dashboard/tsconfig.tsbuildinfo
+out/
+
+# Scratch & test scripts
+scripts/test-*.mjs
+scripts/get-login-link.mjs
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

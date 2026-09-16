@@ -1,0 +1,137 @@
+{
+  "id": "smScheduler00001",
+  "name": "SM · Scheduler",
+  "nodes": [
+    {
+      "id": "8c6482ed-c25a-5b59-a275-b2f0dc204761",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "7c1fd802-c9d5-55db-a5c8-fc8709df36be",
+      "name": "Fail Stuck Posts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE posts SET\n  status = CASE WHEN status = 'publishing' THEN 'failed' ELSE 'draft_failed' END,\n  error = CASE WHEN status = 'publishing'\n    THEN 'Publishing did not finish. Check the Page before retrying, it may already be posted.'\n    ELSE 'Draft generation did not finish.' END\nWHERE status IN ('publishing', 'generating') AND updated_at < now() - interval '15 minutes';",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "fcb87bdd-9deb-5753-a48a-f8f3f4fed68f",
+      "name": "Find Due Posts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id AS post_id FROM posts\nWHERE status = 'scheduled' AND publish_at <= now()\nORDER BY publish_at\nLIMIT 25;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "smPostgresCred01",
+          "name": "SM App Postgres"
+        }
+      }
+    },
+    {
+      "id": "5efcdf26-88fe-5dc5-a0e3-3027c848fead",
+      "name": "Publish Due Post",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        780,
+        0
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "smPublish0000001",
+          "mode": "id"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Fail Stuck Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fail Stuck Posts": {
+      "main": [
+        [
+          {
+            "node": "Find Due Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Due Posts": {
+      "main": [
+        [
+          {
+            "node": "Publish Due Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "smErrorHandler01",
+    "callerPolicy": "workflowsFromSameOwner",
+    "saveDataSuccessExecution": "none"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

@@ -1,0 +1,9 @@
+{$N8N_DOMAIN} {
+	encode gzip
+	reverse_proxy n8n:5678
+}
+
+{$DASHBOARD_DOMAIN} {
+	encode gzip
+	reverse_proxy dashboard:3000
+}
