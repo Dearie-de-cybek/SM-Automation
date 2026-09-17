@@ -1,5 +1,39 @@
 name: sm-automation
 
+# Shared settings for the app containers (worker + dashboard).
+x-app-env: &app-env
+  DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-smapp}
+  APP_URL: ${APP_URL:-http://localhost:3000}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Gemini (optional: AI features stay hidden when the key is missing).
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  AI_MODEL_FAST: ${AI_MODEL_FAST:-gemini-3.5-flash-lite}
+  AI_MODEL_DEFAULT: ${AI_MODEL_DEFAULT:-gemini-3.8-flash}
+  AI_MODEL_PREMIUM: ${AI_MODEL_PREMIUM:-gemini-3.1-pro-preview}
+  AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-gemini-embedding-2}
+  # Telegram bot.
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+  TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+  ADMIN_TELEGRAM_CHAT_ID: ${ADMIN_TELEGRAM_CHAT_ID:-}
+  # Object storage.
+  S3_ENDPOINT: ${S3_ENDPOINT:-}
+  S3_REGION: ${S3_REGION:-auto}
+  S3_BUCKET: ${S3_BUCKET:-}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+  MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-}
+  # Meta / Google / Buffer apps.
+  META_APP_ID: ${META_APP_ID:-}
+  META_APP_SECRET: ${META_APP_SECRET:-}
+  META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-}
+  META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v26.0}
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+  BUFFER_CLIENT_ID: ${BUFFER_CLIENT_ID:-}
+  BUFFER_CLIENT_SECRET: ${BUFFER_CLIENT_SECRET:-}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -19,14 +53,84 @@ services:
       timeout: 5s
       retries: 20
 
+  # One-shot: applies db/migrations, then exits. Both apps wait for it to succeed.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: sm-automation-worker
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-smapp}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    command: ["node", "dist/migrate.js"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: sm-automation-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+      SESSION_SECRET: ${SESSION_SECRET}
+      SIGNUP_CODE: ${SIGNUP_CODE:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    ports:
+      - "3000:3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - dashboard
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Retired: kept for the old workflows only. Start with --profile legacy-n8n.
+  # Only one of (worker, n8n) may own the Telegram webhook.
   n8n:
     image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-latest}
+    profiles: ["legacy-n8n"]
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      # --- n8n core ---
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_PORT: 5432
@@ -45,59 +149,22 @@ services:
       N8N_PERSONALIZATION_ENABLED: "false"
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: 336
-      # Workflows read the app settings below through $env.
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
-      # --- app settings ---
       APP_DB_NAME: ${APP_DB_NAME:-smapp}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       ADMIN_TELEGRAM_CHAT_ID: ${ADMIN_TELEGRAM_CHAT_ID:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v24.0}
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v26.0}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
-      S3_BUCKET: ${S3_BUCKET}
-      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL}
-      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
+      S3_BUCKET: ${S3_BUCKET:-}
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-}
+      DASHBOARD_URL: ${APP_URL:-http://localhost:3000}
     volumes:
       - n8n_data:/home/node/.n8n
       - ./workflows:/workflows:ro
       - ./scripts:/bootstrap:ro
     ports:
       - "5678:5678"
-
-  dashboard:
-    build: ./dashboard
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      # Use a URL-safe POSTGRES_PASSWORD (e.g. openssl rand -hex 24).
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB_NAME:-smapp}
-      APP_URL: ${APP_URL:-http://localhost:3000}
-      SESSION_SECRET: ${SESSION_SECRET}
-      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
-      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
-      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v24.0}
-      SIGNUP_CODE: ${SIGNUP_CODE:-}
-    ports:
-      - "3000:3000"
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    depends_on:
-      - n8n
-      - dashboard
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      N8N_DOMAIN: ${N8N_DOMAIN}
-      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN}
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
 
 volumes:
   pg_data:

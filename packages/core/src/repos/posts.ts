@@ -3,16 +3,9 @@
 // UPDATE (queued/scheduled → publishing, attempts++) BEFORE the provider call, so a
 // replayed job finds zero rows and does nothing.
 
-import type { AnySql } from '../crypto';
+import { jsonParam, type AnySql } from '../crypto';
 import type { Sql } from '../db/client';
-import type {
-  Channel,
-  ErrorKind,
-  MediaItem,
-  PostSource,
-  PostStatus,
-  PostTargetStatus,
-} from '../domain/types';
+import type { Channel, ErrorKind, MediaItem, PostSource, PostStatus, PostTargetStatus } from '../domain/types';
 
 export interface CreatePostTargetInput {
   socialAccountId: string;
@@ -92,6 +85,12 @@ interface TargetRowShape {
 const TARGET_COLUMNS = `id, post_id, client_id, social_account_id, channel, caption, status, publish_at,
   external_id, permalink, error, error_kind, attempts, next_attempt_at, published_at`;
 
+const prefixed = (columns: string, alias: string): string =>
+  columns
+    .split(',')
+    .map((column) => `${alias}.${column.trim()}`)
+    .join(', ');
+
 function toTarget(row: TargetRowShape): TargetSummary {
   return {
     id: row.id,
@@ -119,7 +118,7 @@ export async function createPostWithTargets(sql: Sql, input: CreatePostInput): P
     const [post] = await tx<{ id: string }[]>`
       INSERT INTO posts (client_id, brief, source, media, link_url, campaign_id, platforms, status, publish_at,
                          current_version, source_media_url)
-      VALUES (${input.clientId}::uuid, ${input.brief}, ${input.source}, ${tx.json(input.media ?? [])},
+      VALUES (${input.clientId}::uuid, ${input.brief}, ${input.source}, ${jsonParam(tx, input.media ?? [])},
               ${input.linkUrl ?? null}, ${input.campaignId ?? null}, ${channels}::text[],
               ${input.status ?? 'pending_approval'}, ${input.publishAt ?? null}, 1, ${input.sourceMediaUrl ?? null})
       RETURNING id`;
@@ -127,16 +126,16 @@ export async function createPostWithTargets(sql: Sql, input: CreatePostInput): P
 
     await tx`
       INSERT INTO post_versions (post_id, version, captions, fb_caption, ig_caption, feedback, model)
-      VALUES (${post.id}::uuid, 1, ${tx.json(input.captions)}, ${input.captions.facebook ?? ''},
+      VALUES (${post.id}::uuid, 1, ${jsonParam(tx, input.captions)}, ${input.captions.facebook ?? ''},
               ${input.captions.instagram ?? ''}, ${input.feedback ?? null}, ${input.model ?? null})`;
 
     const targetIds: string[] = [];
     for (const target of input.targets) {
+      const publishAt = target.publishAt ?? input.publishAt ?? null;
       const [row] = await tx<{ id: string }[]>`
         INSERT INTO post_targets (post_id, client_id, social_account_id, channel, caption, status, publish_at)
         VALUES (${post.id}::uuid, ${input.clientId}::uuid, ${target.socialAccountId}::uuid, ${target.channel},
-                ${target.caption}, ${target.status ?? (target.publishAt ?? input.publishAt ? 'scheduled' : 'draft')},
-                ${target.publishAt ?? input.publishAt ?? null})
+                ${target.caption}, ${target.status ?? (publishAt ? 'scheduled' : 'draft')}, ${publishAt})
         RETURNING id`;
       if (row) targetIds.push(row.id);
     }
@@ -156,7 +155,7 @@ export async function addVersion(
     if (!post) throw new Error(`addVersion: post ${postId} not found`);
     await tx`
       INSERT INTO post_versions (post_id, version, captions, fb_caption, ig_caption, feedback, model)
-      VALUES (${postId}::uuid, ${post.current_version}, ${tx.json(input.captions)},
+      VALUES (${postId}::uuid, ${post.current_version}, ${jsonParam(tx, input.captions)},
               ${input.captions.facebook ?? ''}, ${input.captions.instagram ?? ''},
               ${input.feedback ?? null}, ${input.model ?? null})`;
     return post.current_version;
@@ -204,8 +203,7 @@ export async function claimTargetForPublish(sql: AnySql, targetId: string): Prom
         AND (next_attempt_at IS NULL OR next_attempt_at <= now())
       RETURNING *
     )
-    SELECT ${sql.unsafe(TARGET_COLUMNS.split(',').map((column) => `c.${column.trim()}`).join(', '))},
-           p.brief, p.source, p.media, p.link_url
+    SELECT ${sql.unsafe(prefixed(TARGET_COLUMNS, 'c'))}, p.brief, p.source, p.media, p.link_url
     FROM claimed c JOIN posts p ON p.id = c.post_id`;
   if (!row) return null;
   return {
@@ -293,7 +291,8 @@ export async function staleQueuedTargets(sql: AnySql, olderThanMinutes = 5, limi
 
 /**
  * Publishing for too long: the process died mid-call. Never auto-retried — the user
- * has to check the network first.
+ * has to check the network first. Targets that already have a provider id are left to
+ * publish.check instead.
  */
 export async function stuckPublishingTargets(
   sql: AnySql,

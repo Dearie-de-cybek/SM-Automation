@@ -1,0 +1,41 @@
+{
+  "name": "@sm/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./db": "./src/db/index.ts",
+    "./db/*": "./src/db/*.ts",
+    "./bin/*": "./src/bin/*.ts",
+    "./domain": "./src/domain/index.ts",
+    "./domain/*": "./src/domain/*.ts",
+    "./providers": "./src/providers/index.ts",
+    "./providers/*": "./src/providers/*.ts",
+    "./ai": "./src/ai/index.ts",
+    "./ai/*": "./src/ai/*.ts",
+    "./knowledge": "./src/knowledge/index.ts",
+    "./knowledge/*": "./src/knowledge/*.ts",
+    "./policy": "./src/policy/index.ts",
+    "./policy/*": "./src/policy/*.ts",
+    "./telegram": "./src/telegram/index.ts",
+    "./telegram/*": "./src/telegram/*.ts",
+    "./media": "./src/media/index.ts",
+    "./media/*": "./src/media/*.ts",
+    "./repos": "./src/repos/index.ts",
+    "./repos/*": "./src/repos/*.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx src/bin/migrate.ts"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "node-html-parser": "^9.0.4",
+    "pg-boss": "^12.33.0",
+    "postgres": "^3.4.5",
+    "unpdf": "^1.8.1",
+    "zod": "^4.0.0"
+  }
+}

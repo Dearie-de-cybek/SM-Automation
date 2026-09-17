@@ -1,7 +1,7 @@
 // Inbox comments. Polling and webhooks both funnel through upsertComment, which
 // reports whether the row is new so only new comments are triaged.
 
-import type { AnySql } from '../crypto';
+import { jsonParam, type AnySql } from '../crypto';
 import type { Channel, CommentStatus, ProviderId } from '../domain/types';
 
 export interface UpsertCommentInput {
@@ -130,7 +130,7 @@ export async function upsertComment(sql: AnySql, input: UpsertCommentInput): Pro
       post_target_id = COALESCE(EXCLUDED.post_target_id, comments.post_target_id),
       updated_at = now()
     RETURNING id, (xmax = 0) AS inserted`;
-  if (!row) throw new Error('upsertComment: account not found');
+  if (!row) throw new Error('upsertComment: social account not found');
   return { id: row.id, inserted: row.inserted };
 }
 
@@ -192,7 +192,9 @@ export async function setCommentStatus(
   await sql`
     UPDATE comments SET
       status = ${status},
-      classification = ${options.classification === undefined ? sql`classification` : sql.json(options.classification ?? null)},
+      classification = ${
+        options.classification === undefined ? sql`classification` : jsonParam(sql, options.classification ?? null)
+      },
       triage_error = ${options.error ?? null},
       updated_at = now()
     WHERE id = ${commentId}::uuid`;

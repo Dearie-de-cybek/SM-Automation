@@ -1,0 +1,16 @@
+{
+  "name": "@sm/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsup",
+    "start": "node dist/index.js",
+    "migrate": "node dist/migrate.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sm/core": "*"
+  }
+}
