@@ -86,16 +86,18 @@ export async function getBrandProfile(clientId: string): Promise<BrandProfile> {
   };
 }
 
-export async function getPostStats(clientId: string) {
+export type PostStats = { awaiting: number; scheduled: number; published_30d: number; attention: number };
+
+export async function getPostStats(clientId: string): Promise<PostStats> {
   const sql = db();
-  const [row] = await sql<{ awaiting: number; scheduled: number; published_30d: number; attention: number }[]>`
+  const [row] = await sql<PostStats[]>`
     SELECT
       count(*) FILTER (WHERE status IN ('generating', 'pending_approval'))::int AS awaiting,
       count(*) FILTER (WHERE status IN ('approved', 'scheduled', 'publishing'))::int AS scheduled,
       count(*) FILTER (WHERE status IN ('published', 'partially_published') AND published_at > now() - interval '30 days')::int AS published_30d,
       count(*) FILTER (WHERE status IN ('failed', 'draft_failed', 'partially_published'))::int AS attention
     FROM posts WHERE client_id = ${clientId}::uuid`;
-  return row;
+  return row ?? { awaiting: 0, scheduled: 0, published_30d: 0, attention: 0 };
 }
 
 export async function listPosts(clientId: string, group: StatusGroup, page: number) {

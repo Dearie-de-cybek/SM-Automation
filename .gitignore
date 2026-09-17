@@ -7,11 +7,14 @@
 node_modules/
 npm-debug.log*
 
-# Next.js build output
+# Build output
+dist/
 .next/
-dashboard/.next/
-dashboard/tsconfig.tsbuildinfo
 out/
+*.tsbuildinfo
+
+# Coverage
+coverage/
 
 # Scratch & test scripts
 scripts/test-*.mjs

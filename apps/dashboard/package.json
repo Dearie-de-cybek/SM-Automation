@@ -1,5 +1,5 @@
 {
-  "name": "sm-dashboard",
+  "name": "@sm/dashboard",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@sm/core": "*",
     "jose": "^6.0.0",
     "next": "^16.0.0",
     "postgres": "^3.4.5",
