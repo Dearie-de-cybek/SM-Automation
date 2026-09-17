@@ -1,0 +1,23 @@
+{
+  "name": "sm-automation",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build -w @sm/worker && npm run build -w @sm/dashboard",
+    "migrate": "npm run migrate -w @sm/core"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  }
+}
