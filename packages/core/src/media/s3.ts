@@ -89,12 +89,15 @@ export async function presignPut(
   key: string,
   contentType: string,
   expiresSeconds: number = DEFAULT_PRESIGN_EXPIRY_SECONDS,
+  contentLength?: number,
 ): Promise<string> {
   const url = new URL(objectUrl(config, key));
   url.searchParams.set('X-Amz-Expires', String(Math.min(Math.max(expiresSeconds, 60), 604_800)));
+  const headers: Record<string, string> = { 'Content-Type': contentType };
+  if (contentLength !== undefined) headers['Content-Length'] = String(contentLength);
   const signed = await clientFor(config).sign(url.toString(), {
     method: 'PUT',
-    headers: { 'Content-Type': contentType },
+    headers,
     aws: { signQuery: true, allHeaders: true },
   });
   return signed.url;

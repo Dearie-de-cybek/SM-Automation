@@ -9,6 +9,15 @@ const optional = z.preprocess(
 const withDefault = (fallback: string) =>
   z.preprocess((value) => (typeof value === 'string' && value.trim() === '' ? undefined : value), z.string().min(1).default(fallback));
 
+const disabledByDefault = z
+  .preprocess(
+    (value) => (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+      ? undefined
+      : String(value).trim().toLowerCase()),
+    z.enum(['true', 'false']).default('false'),
+  )
+  .transform((value) => value === 'true');
+
 const schema = z.object({
   DATABASE_URL: z.string().min(1),
   OPERATOR_DATABASE_URL: z.string().min(1),
@@ -40,6 +49,7 @@ const schema = z.object({
   META_APP_ID: optional,
   META_APP_SECRET: optional,
   META_WEBHOOK_VERIFY_TOKEN: optional,
+  META_DIRECT_ENABLED: disabledByDefault,
 
   GOOGLE_CLIENT_ID: optional,
   GOOGLE_CLIENT_SECRET: optional,
@@ -77,7 +87,7 @@ export function features(): {
     media: Boolean(
       current.S3_ENDPOINT && current.S3_BUCKET && current.S3_ACCESS_KEY_ID && current.S3_SECRET_ACCESS_KEY && current.MEDIA_PUBLIC_BASE_URL,
     ),
-    metaOAuth: Boolean(current.META_APP_ID && current.META_APP_SECRET),
+    metaOAuth: current.META_DIRECT_ENABLED && Boolean(current.META_APP_ID && current.META_APP_SECRET),
     googleOAuth: Boolean(current.GOOGLE_CLIENT_ID && current.GOOGLE_CLIENT_SECRET),
     bufferOAuth: Boolean(current.BUFFER_CLIENT_ID),
     telegramWebhook: Boolean(current.TELEGRAM_WEBHOOK_SECRET),
