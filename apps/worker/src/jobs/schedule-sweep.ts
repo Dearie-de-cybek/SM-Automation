@@ -2,6 +2,7 @@
 // stuck publishing/sending rows, roll up post status. Makes a lost send() harmless.
 import type { PostStatus } from '@sm/core/domain/types';
 import type { ParsedJobPayload } from '@sm/core/jobs';
+import { pendingCommentsForTriage, stuckTriagingComments } from '@sm/core/repos/comments';
 import {
   dueScheduledTargets,
   listPostsInFlight,
@@ -11,6 +12,7 @@ import {
   stuckPublishingTargets,
 } from '@sm/core/repos/posts';
 import { stuckSendingReplies } from '@sm/core/repos/replies';
+import { pendingWebhookEvents } from '@sm/core/repos/webhooks';
 import type { WorkerDeps } from '../deps';
 
 type ScheduleRuntime = Pick<WorkerDeps, 'log' | 'enqueue'>;
@@ -35,6 +37,9 @@ export interface ScheduleSweepOperations {
   stuckSendingReplies(): Promise<TenantTarget[]>;
   postsInFlight(): Promise<{ id: string; clientId: string }[]>;
   rollUp(postId: string): Promise<PostStatus | null>;
+  pendingComments?(): Promise<TargetId[]>;
+  resetStuckComments?(): Promise<TargetId[]>;
+  pendingWebhooks?(): Promise<{ id: string; provider: string }[]>;
   now(): Date;
 }
 
@@ -47,6 +52,9 @@ function defaultOperations(deps: WorkerDeps): ScheduleSweepOperations {
     stuckSendingReplies: () => stuckSendingReplies(deps.sql),
     postsInFlight: () => listPostsInFlight(deps.sql),
     rollUp: (postId) => rollUpPostStatus(deps.sql, postId),
+    pendingComments: () => pendingCommentsForTriage(deps.sql),
+    resetStuckComments: () => stuckTriagingComments(deps.sql),
+    pendingWebhooks: () => pendingWebhookEvents(deps.sql),
     now: () => new Date(),
   };
 }
@@ -91,12 +99,26 @@ export async function runScheduleSweep(
   if (interruptedReplies.length > 0) {
     deps.log.warn('stuck reply sends marked failed', { count: interruptedReplies.length });
   }
+
+  const resetComments = await operations.resetStuckComments?.() ?? [];
+  const pendingComments = [...resetComments, ...(await operations.pendingComments?.() ?? [])];
+  for (const comment of new Map(pendingComments.map((item) => [item.id, item])).values()) {
+    await deps.enqueue('comment.triage', { commentId: comment.id }, { dedupeBucket: `sweep:${bucket}:comment:${comment.id}` });
+  }
+
+  const webhooks = await operations.pendingWebhooks?.() ?? [];
+  for (const event of webhooks) {
+    const name = event.provider === 'telegram' ? 'telegram.update' : 'webhook.process';
+    await deps.enqueue(name, { eventId: event.id }, { dedupeBucket: `sweep:${bucket}:webhook:${event.id}` });
+  }
   deps.log.info('schedule sweep complete', {
     due: due.length,
     stale: stale.length,
     pendingChecks: pending.length,
     interruptedTargets: interrupted.length,
     interruptedReplies: interruptedReplies.length,
+    commentsRecovered: pendingComments.length,
+    webhooksRecovered: webhooks.length,
   });
 }
 
