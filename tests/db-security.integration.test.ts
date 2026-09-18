@@ -78,7 +78,7 @@ run('all tenant tables force RLS', async () => {
 });
 
 run('dashboard fails closed and cannot cross tenant through direct or indirect rows', async () => {
-  assert.deepEqual(await app<{ id: string }[]>`SELECT id FROM clients`, []);
+  assert.equal((await app<{ id: string }[]>`SELECT id FROM clients`).length, 0);
 
   const visible = await app.begin(async (tx) => {
     await tx`SELECT set_config('app.client_id', ${clientA}, true)`;
@@ -102,7 +102,8 @@ run('pre-auth and operator capabilities are narrow functions only', async () => 
 
   const signup = await app<{ name: string }[]>`
     SELECT * FROM app_signup_client('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`;
-  assert.deepEqual(signup, [{ name: 'Tenant A' }]);
+  assert.equal(signup.length, 1);
+  assert.equal(signup[0]?.name, 'Tenant A');
 
   const clients = await operator<{ id: string }[]>`SELECT id FROM app_admin_list_clients() ORDER BY id`;
   assert.deepEqual(clients.map((row) => row.id), [clientA, clientB]);
@@ -116,13 +117,13 @@ run('dashboard can store a webhook only through the deduplicating ingress functi
 
   const [stored] = await app<{ event_id: string | null }[]>`
     SELECT app_store_webhook_event(
-      'telegram', ${webhookEventKey}, ${JSON.stringify({ update_id: 42 })}::jsonb
+      'telegram', ${webhookEventKey}, ${app.json({ update_id: 42 })}
     )::text AS event_id`;
   assert.match(stored?.event_id ?? '', /^\d+$/);
 
   const [duplicate] = await app<{ event_id: string | null }[]>`
     SELECT app_store_webhook_event(
-      'telegram', ${webhookEventKey}, ${JSON.stringify({ update_id: 99 })}::jsonb
+      'telegram', ${webhookEventKey}, ${app.json({ update_id: 99 })}
     )::text AS event_id`;
   assert.equal(duplicate?.event_id, null);
 
@@ -152,7 +153,7 @@ run('worker access is explicit while runtime logins remain unprivileged', async 
       JOIN pg_roles member_role ON member_role.oid = membership.member
       JOIN pg_roles inherited_role ON inherited_role.oid = membership.roleid
      WHERE member_role.rolname IN ('sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core')`;
-  assert.deepEqual(nestedMemberships, []);
+  assert.equal(nestedMemberships.length, 0);
 });
 
 run('PUBLIC and n8n-core cannot connect to app database', async () => {

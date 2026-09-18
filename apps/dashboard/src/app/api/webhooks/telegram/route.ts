@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import type postgres from 'postgres';
 import { enqueueJob, sql } from '@/lib/core';
 import { env } from '@/lib/env';
 
@@ -32,9 +33,9 @@ export async function POST(request: Request): Promise<Response> {
   const raw = await request.text();
   if (Buffer.byteLength(raw) > MAX_BODY_BYTES) return Response.json({ error: 'payload too large' }, { status: 413 });
 
-  let update: unknown;
+  let update: postgres.JSONValue;
   try {
-    update = JSON.parse(raw) as unknown;
+    update = JSON.parse(raw) as postgres.JSONValue;
   } catch {
     return Response.json({ error: 'invalid json' }, { status: 400 });
   }
@@ -45,7 +46,7 @@ export async function POST(request: Request): Promise<Response> {
   const updateId = String((update as { update_id: number }).update_id);
   const db = sql();
   const [stored] = await db<{ event_id: string | null }[]>`
-    SELECT app_store_webhook_event('telegram', ${updateId}, ${raw}::jsonb)::text AS event_id`;
+    SELECT app_store_webhook_event('telegram', ${updateId}, ${db.json(update)})::text AS event_id`;
   if (stored?.event_id) {
     const payload = { eventId: stored.event_id };
     await enqueueJob('telegram.update', payload, { dedupeBucket: updateId });

@@ -1,4 +1,5 @@
 import { parseMetaWebhook, verifyMetaSignature, verifyMetaVerifyToken } from '@sm/core/providers/meta/webhook';
+import type postgres from 'postgres';
 import { enqueueJob, sql } from '@/lib/core';
 import { env } from '@/lib/env';
 
@@ -40,9 +41,9 @@ export async function POST(request: Request): Promise<Response> {
 
   const db = sql();
   for (const event of parseMetaWebhook(payload)) {
-    const serialized = JSON.stringify(event);
+    const eventJson = event as unknown as postgres.JSONValue;
     const [stored] = await db<{ event_id: string | null }[]>`
-      SELECT app_store_webhook_event('meta', ${event.eventKey}, ${serialized}::jsonb)::text AS event_id`;
+      SELECT app_store_webhook_event('meta', ${event.eventKey}, ${db.json(eventJson)})::text AS event_id`;
     if (stored?.event_id) {
       await enqueueJob('webhook.process', { eventId: stored.event_id }, { dedupeBucket: event.eventKey });
     }
