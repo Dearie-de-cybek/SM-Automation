@@ -199,7 +199,7 @@ export async function claimTargetForPublish(sql: AnySql, targetId: string): Prom
       UPDATE post_targets SET status = 'publishing', attempts = attempts + 1, error = NULL, error_kind = NULL,
                               next_attempt_at = NULL, updated_at = now()
       WHERE id = ${targetId}::uuid
-        AND status IN ('queued', 'scheduled')
+        AND (status = 'queued' OR (status = 'scheduled' AND publish_at IS NOT NULL AND publish_at <= now()))
         AND (next_attempt_at IS NULL OR next_attempt_at <= now())
       RETURNING *
     )
@@ -217,21 +217,25 @@ export async function claimTargetForPublish(sql: AnySql, targetId: string): Prom
 }
 
 /** Record the provider id while the post is still settling (Buffer "pending"). */
-export async function markTargetPublishing(sql: AnySql, targetId: string, externalId: string): Promise<void> {
-  await sql`
+export async function markTargetPublishing(sql: AnySql, targetId: string, externalId: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
     UPDATE post_targets SET external_id = ${externalId}, updated_at = now()
-    WHERE id = ${targetId}::uuid AND status = 'publishing'`;
+    WHERE id = ${targetId}::uuid AND status = 'publishing'
+    RETURNING id`;
+  return rows.length > 0;
 }
 
 export async function markTargetPublished(
   sql: AnySql,
   targetId: string,
   result: { externalId: string; permalink: string | null },
-): Promise<void> {
-  await sql`
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
     UPDATE post_targets SET status = 'published', external_id = ${result.externalId}, permalink = ${result.permalink},
                             error = NULL, error_kind = NULL, published_at = now(), updated_at = now()
-    WHERE id = ${targetId}::uuid AND status IN ('publishing', 'queued')`;
+    WHERE id = ${targetId}::uuid AND status IN ('publishing', 'queued')
+    RETURNING id`;
+  return rows.length > 0;
 }
 
 export interface MarkTargetFailedInput {
@@ -247,7 +251,7 @@ export interface MarkTargetFailedInput {
  * Fail (or re-queue) a target. Returns the status it ended in so the caller can decide
  * whether to notify.
  */
-export async function markTargetFailed(sql: AnySql, targetId: string, input: MarkTargetFailedInput): Promise<PostTargetStatus> {
+export async function markTargetFailed(sql: AnySql, targetId: string, input: MarkTargetFailedInput): Promise<PostTargetStatus | null> {
   const maxAttempts = input.maxAttempts ?? 5;
   const backoffSec = Math.min(input.retryAfterSec ?? 60, 3600);
   const [row] = await sql<{ status: PostTargetStatus }[]>`
@@ -260,7 +264,7 @@ export async function markTargetFailed(sql: AnySql, targetId: string, input: Mar
       updated_at = now()
     WHERE id = ${targetId}::uuid AND status IN ('publishing', 'queued', 'scheduled')
     RETURNING status`;
-  return row?.status ?? 'failed';
+  return row?.status ?? null;
 }
 
 /** scheduled → queued for everything due now. Returns the ids to enqueue. */
@@ -332,6 +336,14 @@ export async function publishingTargetsToCheck(
   return rows.map((row) => ({ id: row.id, externalId: row.external_id }));
 }
 
+/** Read one unsettled target for a side-effect-free provider status check. */
+export async function getPublishingTargetForCheck(sql: AnySql, targetId: string): Promise<TargetSummary | null> {
+  const [row] = await sql<TargetRowShape[]>`
+    SELECT ${sql.unsafe(TARGET_COLUMNS)} FROM post_targets
+    WHERE id = ${targetId}::uuid AND status = 'publishing' AND external_id IS NOT NULL`;
+  return row ? toTarget(row) : null;
+}
+
 /**
  * Derive the post status from its targets:
  * all published ⇒ published; some published ⇒ partially_published;
@@ -362,12 +374,13 @@ export async function rollUpPostStatus(sql: AnySql, postId: string): Promise<Pos
 }
 
 /** Posts whose roll-up may be stale (sweeper input). */
-export async function listPostsInFlight(sql: AnySql, limit = 200): Promise<{ id: string }[]> {
-  return sql<{ id: string }[]>`
-    SELECT id FROM posts
+export async function listPostsInFlight(sql: AnySql, limit = 200): Promise<{ id: string; clientId: string }[]> {
+  const rows = await sql<{ id: string; client_id: string }[]>`
+    SELECT id, client_id FROM posts
     WHERE status IN ('approved', 'scheduled', 'publishing')
     ORDER BY updated_at
     LIMIT ${limit}`;
+  return rows.map((row) => ({ id: row.id, clientId: row.client_id }));
 }
 
 export async function cancelTarget(sql: AnySql, clientId: string, targetId: string): Promise<boolean> {

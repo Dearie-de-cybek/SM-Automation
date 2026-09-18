@@ -29,7 +29,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/bin/migrate.ts",
-    "test": "tsx --test src/telegram/api.test.ts src/telegram/schedule-time.test.ts"
+    "test": "tsx --test src/telegram/api.test.ts src/telegram/schedule-time.test.ts src/repos/posts.test.ts"
   },
   "dependencies": {
     "aws4fetch": "^1.0.20",

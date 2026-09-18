@@ -9,7 +9,7 @@
     "migrate": "node dist/migrate.js",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/lib/errors.test.ts src/lib/notify.test.ts src/lib/provider-context.test.ts src/lib/retry.test.ts"
+    "test": "tsx --test src/lib/errors.test.ts src/lib/notify.test.ts src/lib/provider-context.test.ts src/lib/retry.test.ts src/jobs/publication.test.ts"
   },
   "dependencies": {
     "@sm/core": "*"
