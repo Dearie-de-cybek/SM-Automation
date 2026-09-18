@@ -2,10 +2,10 @@
 
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { db } from '@/lib/db';
 import { isValidTimeZone } from '@/lib/format';
 import { GraphError, saveClientMetaCredentials, verifyMetaCredentials } from '@/lib/meta';
 import { requireClientViewer } from '@/lib/session';
+import { withTenantTransaction } from '@/lib/tenant-db';
 
 export type SaveState = { saved?: boolean; error?: string };
 
@@ -31,21 +31,22 @@ export async function saveBrandProfile(_prev: SaveState, formData: FormData): Pr
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Please check the form' };
   const b = parsed.data;
 
-  const sql = db();
-  await sql`
-    WITH tz AS (
-      UPDATE clients SET timezone = ${b.timezone} WHERE id = ${viewer.actingClientId}::uuid
-    )
-    INSERT INTO brand_profiles (client_id, business_description, audience, voice, language, emoji_policy, default_cta, hashtags, banned_words, sample_posts)
-    VALUES (
-      ${viewer.actingClientId}::uuid, ${b.business_description}, ${b.audience},
-      ${b.voice || 'Friendly, clear and professional'}, ${b.language || 'English'}, ${b.emoji_policy || 'A few relevant emojis'},
-      ${b.default_cta}, ${sql.array(b.hashtags)}::text[], ${sql.array(b.banned_words)}::text[], ${b.sample_posts}
-    )
-    ON CONFLICT (client_id) DO UPDATE SET
-      business_description = EXCLUDED.business_description, audience = EXCLUDED.audience, voice = EXCLUDED.voice,
-      language = EXCLUDED.language, emoji_policy = EXCLUDED.emoji_policy, default_cta = EXCLUDED.default_cta,
-      hashtags = EXCLUDED.hashtags, banned_words = EXCLUDED.banned_words, sample_posts = EXCLUDED.sample_posts`;
+  await withTenantTransaction(viewer.actingClientId, async (sql) => {
+    await sql`
+      WITH tz AS (
+        UPDATE clients SET timezone = ${b.timezone} WHERE id = ${viewer.actingClientId}::uuid
+      )
+      INSERT INTO brand_profiles (client_id, business_description, audience, voice, language, emoji_policy, default_cta, hashtags, banned_words, sample_posts)
+      VALUES (
+        ${viewer.actingClientId}::uuid, ${b.business_description}, ${b.audience},
+        ${b.voice || 'Friendly, clear and professional'}, ${b.language || 'English'}, ${b.emoji_policy || 'A few relevant emojis'},
+        ${b.default_cta}, ${sql.array(b.hashtags)}::text[], ${sql.array(b.banned_words)}::text[], ${b.sample_posts}
+      )
+      ON CONFLICT (client_id) DO UPDATE SET
+        business_description = EXCLUDED.business_description, audience = EXCLUDED.audience, voice = EXCLUDED.voice,
+        language = EXCLUDED.language, emoji_policy = EXCLUDED.emoji_policy, default_cta = EXCLUDED.default_cta,
+        hashtags = EXCLUDED.hashtags, banned_words = EXCLUDED.banned_words, sample_posts = EXCLUDED.sample_posts`;
+  });
 
   revalidatePath('/settings');
   revalidatePath('/');

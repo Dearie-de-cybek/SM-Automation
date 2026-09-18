@@ -10,6 +10,8 @@
     "node": ">=22.12"
   },
   "scripts": {
+    "test": "tsx --test tests/db-security.contract.test.ts",
+    "test:db:integration": "tsx --test tests/db-security.integration.test.ts",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build -w @sm/worker && npm run build -w @sm/dashboard",
     "migrate": "npm run migrate -w @sm/core"

@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { db } from '@/lib/db';
+import { operatorDb } from '@/lib/admin-db';
 import { isUuid, requireAdmin, setActingClient } from '@/lib/session';
 
 export async function viewAsClient(formData: FormData): Promise<void> {
@@ -24,7 +24,7 @@ export async function toggleClientActive(formData: FormData): Promise<void> {
   await requireAdmin();
   const clientId = String(formData.get('client_id') ?? '');
   if (!isUuid(clientId)) return;
-  await db()`UPDATE clients SET active = NOT active WHERE id = ${clientId}::uuid`;
+  await operatorDb()`SELECT app_admin_toggle_client(${clientId}::uuid)`;
   revalidatePath('/admin');
 }
 
@@ -34,11 +34,7 @@ export async function createClientInvite(formData: FormData): Promise<void> {
   const name = String(formData.get('name') ?? '').trim().slice(0, 100);
   if (name.length < 2) return;
   const code = randomBytes(16).toString('hex');
-  await db()`
-    WITH created AS (
-      INSERT INTO clients (name, telegram_link_code) VALUES (${name}, ${code}) RETURNING id
-    )
-    INSERT INTO brand_profiles (client_id) SELECT id FROM created`;
+  await operatorDb()`SELECT app_admin_create_client(${name}, ${code})`;
   revalidatePath('/admin');
   redirect(`/admin?invite=${code}`);
 }

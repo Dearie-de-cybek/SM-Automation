@@ -11,6 +11,7 @@ const withDefault = (fallback: string) =>
 
 const schema = z.object({
   DATABASE_URL: z.string().min(1),
+  OPERATOR_DATABASE_URL: z.string().min(1),
   SESSION_SECRET: z.string().min(32, 'SESSION_SECRET must be at least 32 characters'),
   TOKEN_ENCRYPTION_KEY: z.string().min(16),
   APP_URL: z.string().url(),

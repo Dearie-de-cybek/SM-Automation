@@ -9,7 +9,7 @@ export default async function ConnectTelegramPage({ searchParams }: { searchPara
   if (!/^[0-9a-f]{32}$/.test(code)) notFound();
 
   const sql = db();
-  const [client] = await sql<{ name: string }[]>`SELECT name FROM clients WHERE telegram_link_code = ${code}`;
+  const [client] = await sql<{ name: string }[]>`SELECT * FROM app_signup_client(${code})`;
 
   return (
     <main className="flex min-h-screen items-center justify-center px-4 py-10">

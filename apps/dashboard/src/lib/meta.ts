@@ -1,5 +1,5 @@
-import { db } from './db';
 import { env } from './env';
+import { withTenantTransaction } from './tenant-db';
 
 export class GraphError extends Error {}
 
@@ -46,17 +46,18 @@ export async function saveClientMetaCredentials(params: {
   igUserId?: string | null;
   igUsername?: string | null;
 }): Promise<void> {
-  const sql = db();
   const platforms = params.igUserId ? ['facebook', 'instagram'] : ['facebook'];
 
-  await sql`
-    UPDATE clients SET
-      fb_page_id = ${params.pageId},
-      fb_page_name = ${params.pageName},
-      ig_user_id = ${params.igUserId ?? null},
-      ig_username = ${params.igUsername ?? null},
-      meta_token_enc = pgp_sym_encrypt(${params.pageToken}, ${env().TOKEN_ENCRYPTION_KEY}::text),
-      meta_connected_at = now(),
-      default_platforms = ${platforms}::text[]
-    WHERE id = ${params.clientId}::uuid`;
+  await withTenantTransaction(params.clientId, async (sql) => {
+    await sql`
+      UPDATE clients SET
+        fb_page_id = ${params.pageId},
+        fb_page_name = ${params.pageName},
+        ig_user_id = ${params.igUserId ?? null},
+        ig_username = ${params.igUsername ?? null},
+        meta_token_enc = pgp_sym_encrypt(${params.pageToken}, ${env().TOKEN_ENCRYPTION_KEY}::text),
+        meta_connected_at = now(),
+        default_platforms = ${platforms}::text[]
+      WHERE id = ${params.clientId}::uuid`;
+  });
 }
