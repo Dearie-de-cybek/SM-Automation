@@ -110,7 +110,7 @@ function roundTrips(zone: string, wall: WallClock, instant: Date): boolean {
 
 const labelFormatters = new Map<string, Intl.DateTimeFormat>();
 
-/** "Thu 24 Dec 2026, 18:00 (Europe/Lagos)" — same shape as the n8n bot used. */
+/** Format a scheduled instant for the Telegram confirmation message. */
 export function formatLocalTime(date: Date, zone: string): string {
   let formatter = labelFormatters.get(zone);
   if (!formatter) {

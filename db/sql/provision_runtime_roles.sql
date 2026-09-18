@@ -5,9 +5,6 @@
 \getenv operator_db_password OPERATOR_DB_PASSWORD
 \getenv worker_db_user WORKER_DB_USER
 \getenv worker_db_password WORKER_DB_PASSWORD
-\getenv n8n_db_user N8N_DB_USER
-\getenv n8n_db_password N8N_DB_PASSWORD
-\getenv n8n_db_name N8N_DB_NAME
 
 CREATE OR REPLACE FUNCTION pg_temp.provision_runtime_logins(
   login_names text[], login_passwords text[], memberships text[]
@@ -21,22 +18,22 @@ DECLARE
   membership text;
   privileged boolean;
 BEGIN
-  IF array_length(login_names, 1) <> 4 OR array_length(login_passwords, 1) <> 4
-     OR array_length(memberships, 1) <> 4 THEN
-    RAISE EXCEPTION 'Exactly four runtime database logins are required';
+  IF array_length(login_names, 1) <> 3 OR array_length(login_passwords, 1) <> 3
+     OR array_length(memberships, 1) <> 3 THEN
+    RAISE EXCEPTION 'Exactly three runtime database logins are required';
   END IF;
   IF EXISTS (SELECT 1 FROM unnest(login_names) item WHERE item IS NULL OR item = '')
      OR EXISTS (SELECT 1 FROM unnest(login_passwords) item WHERE item IS NULL OR item = '') THEN
     RAISE EXCEPTION 'Runtime database user names and passwords must not be empty';
   END IF;
-  IF (SELECT count(DISTINCT item) FROM unnest(login_names) item) <> 4 THEN
+  IF (SELECT count(DISTINCT item) FROM unnest(login_names) item) <> 3 THEN
     RAISE EXCEPTION 'Runtime database user names must be distinct';
   END IF;
   IF login_names && memberships THEN
     RAISE EXCEPTION 'Runtime login names must differ from group role names';
   END IF;
 
-  FOR position IN 1..4 LOOP
+  FOR position IN 1..3 LOOP
     login_name := login_names[position];
     login_password := login_passwords[position];
     membership := memberships[position];
@@ -87,25 +84,7 @@ END
 $$;
 
 SELECT pg_temp.provision_runtime_logins(
-  ARRAY[:'app_db_user', :'operator_db_user', :'worker_db_user', :'n8n_db_user'],
-  ARRAY[:'app_db_password', :'operator_db_password', :'worker_db_password', :'n8n_db_password'],
-  ARRAY['sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core']
+  ARRAY[:'app_db_user', :'operator_db_user', :'worker_db_user'],
+  ARRAY[:'app_db_password', :'operator_db_password', :'worker_db_password'],
+  ARRAY['sm_app', 'sm_operator', 'sm_worker']
 );
-
--- n8n's internal database is a separate trust boundary. Its login cannot connect to
--- the application database because PUBLIC CONNECT was revoked by migration 004.
-SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', :'n8n_db_name') \gexec
-SELECT format('GRANT CONNECT, TEMPORARY ON DATABASE %I TO sm_n8n_core', :'n8n_db_name') \gexec
-\connect :n8n_db_name
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE, CREATE ON SCHEMA public TO sm_n8n_core;
-GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
-  ON ALL TABLES IN SCHEMA public TO sm_n8n_core;
-GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO sm_n8n_core;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO sm_n8n_core;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLES TO sm_n8n_core;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO sm_n8n_core;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT EXECUTE ON FUNCTIONS TO sm_n8n_core;

@@ -1,4 +1,4 @@
-// Hand one stored Telegram update to the router (port of the n8n bot flow).
+// Hand one stored Telegram update to the application router.
 import type { ParsedJobPayload } from '@sm/core/jobs';
 import { claimWebhookEvent, markWebhookFailed, markWebhookProcessed } from '@sm/core/repos/webhooks';
 import { handleTelegramUpdate, type TelegramUpdate } from '@sm/core/telegram/router';
