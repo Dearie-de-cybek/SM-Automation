@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { after, before, test } from 'node:test';
 import postgres from 'postgres';
 
@@ -15,6 +16,7 @@ const postA = '20000000-0000-4000-8000-000000000001';
 const postB = '20000000-0000-4000-8000-000000000002';
 const versionA = 9_000_001;
 const versionB = 9_000_002;
+const webhookEventKey = `security-integration-${randomUUID()}`;
 
 let admin: postgres.Sql;
 let app: postgres.Sql;
@@ -106,6 +108,29 @@ run('pre-auth and operator capabilities are narrow functions only', async () => 
   assert.deepEqual(clients.map((row) => row.id), [clientA, clientB]);
 });
 
+run('dashboard can store a webhook only through the deduplicating ingress function', async () => {
+  await assert.rejects(
+    app`INSERT INTO webhook_events (provider, event_key, payload) VALUES ('telegram', ${webhookEventKey}, '{}'::jsonb)`,
+    /permission denied/i,
+  );
+
+  const [stored] = await app<{ event_id: string | null }[]>`
+    SELECT app_store_webhook_event(
+      'telegram', ${webhookEventKey}, ${JSON.stringify({ update_id: 42 })}::jsonb
+    )::text AS event_id`;
+  assert.match(stored?.event_id ?? '', /^\d+$/);
+
+  const [duplicate] = await app<{ event_id: string | null }[]>`
+    SELECT app_store_webhook_event(
+      'telegram', ${webhookEventKey}, ${JSON.stringify({ update_id: 99 })}::jsonb
+    )::text AS event_id`;
+  assert.equal(duplicate?.event_id, null);
+
+  const [persisted] = await worker<{ payload: { update_id: number } }[]>`
+    SELECT payload FROM webhook_events WHERE provider = 'telegram' AND event_key = ${webhookEventKey}`;
+  assert.deepEqual(persisted?.payload, { update_id: 42 });
+});
+
 run('worker access is explicit while runtime logins remain unprivileged', async () => {
   const clients = await worker<{ id: string }[]>`SELECT id FROM clients ORDER BY id`;
   assert.deepEqual(clients.map((row) => row.id), [clientA, clientB]);
@@ -113,10 +138,21 @@ run('worker access is explicit while runtime logins remain unprivileged', async 
   const roles = await admin<{ rolname: string; rolsuper: boolean; rolcreatedb: boolean; rolcreaterole: boolean; rolbypassrls: boolean }[]>`
     SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
       FROM pg_roles
-     WHERE rolname IN ('sm_app_test', 'sm_operator_test', 'sm_worker_test', 'sm_n8n_test')
+     WHERE rolname IN (
+       'sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core',
+       'sm_app_test', 'sm_operator_test', 'sm_worker_test', 'sm_n8n_test'
+     )
      ORDER BY rolname`;
-  assert.equal(roles.length, 4);
+  assert.equal(roles.length, 8);
   assert.ok(roles.every((role) => !role.rolsuper && !role.rolcreatedb && !role.rolcreaterole && !role.rolbypassrls));
+
+  const nestedMemberships = await admin<{ member: string; inherited_role: string }[]>`
+    SELECT member_role.rolname AS member, inherited_role.rolname AS inherited_role
+      FROM pg_auth_members membership
+      JOIN pg_roles member_role ON member_role.oid = membership.member
+      JOIN pg_roles inherited_role ON inherited_role.oid = membership.roleid
+     WHERE member_role.rolname IN ('sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core')`;
+  assert.deepEqual(nestedMemberships, []);
 });
 
 run('PUBLIC and n8n-core cannot connect to app database', async () => {

@@ -152,7 +152,10 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
 
     let response: Response;
     try {
-      response = await fetchImpl(target, { method, headers, body, signal, redirect: 'follow' });
+      // Copy typed-array bodies onto an ArrayBuffer-backed view. DOM fetch rejects
+      // Uint8Array<ArrayBufferLike> because SharedArrayBuffer is not a BodyInit.
+      const fetchBody = body instanceof Uint8Array ? new Blob([new Uint8Array(body)]) : body;
+      response = await fetchImpl(target, { method, headers, body: fetchBody, signal, redirect: 'follow' });
     } catch (error: unknown) {
       if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
         // A timeout does NOT prove the request was rejected: never auto-retry it.

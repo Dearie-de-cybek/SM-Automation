@@ -240,3 +240,15 @@ export async function stuckTriagingComments(sql: AnySql, olderThanMinutes = 15, 
     )
     RETURNING id`;
 }
+
+/** New comments whose enqueue was lost. The sweeper re-enqueues them after a short grace period. */
+export async function pendingCommentsForTriage(
+  sql: AnySql,
+  olderThanMinutes = 2,
+  limit = 200,
+): Promise<{ id: string }[]> {
+  return sql<{ id: string }[]>`
+    SELECT id FROM comments
+    WHERE status = 'new' AND created_at < now() - make_interval(mins => ${olderThanMinutes})
+    ORDER BY created_at LIMIT ${limit}`;
+}

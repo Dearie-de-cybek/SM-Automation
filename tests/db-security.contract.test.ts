@@ -7,9 +7,20 @@ const read = (path: string): Promise<string> => readFile(new URL(`../${path}`, i
 test('tenant-security migration installs forced RLS and narrow runtime roles', async () => {
   const migration = await read('db/migrations/004_tenant_security.sql');
 
-  for (const role of ['sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core']) {
-    assert.match(migration, new RegExp(`CREATE ROLE ${role}\\b`));
-  }
+  const requiredRoles = ['sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core'];
+  const roleLoop = migration.match(
+    /FOREACH role_name IN ARRAY ARRAY\[(?<roles>[^\]]+)\] LOOP/i,
+  );
+  assert.ok(roleLoop?.groups?.roles, 'migration must enumerate runtime group roles');
+  const declaredRoles = [...roleLoop.groups.roles.matchAll(/'([^']+)'/g)].map((match) => match[1]);
+  assert.deepEqual(declaredRoles, requiredRoles);
+  assert.match(
+    migration,
+    /CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS/i,
+  );
+  assert.match(migration, /FROM pg_catalog\.pg_auth_members inherited_membership/i);
+  assert.match(migration, /WHERE inherited_membership\.member = runtime_role\.oid/i);
+  assert.match(migration, /RAISE EXCEPTION 'Refusing incompatible runtime group role %'/i);
 
   const tenantTables = [
     'clients',
@@ -40,6 +51,18 @@ test('tenant-security migration installs forced RLS and narrow runtime roles', a
 
   assert.match(migration, /REVOKE CONNECT ON DATABASE .* FROM PUBLIC/i);
   assert.match(migration, /SECURITY DEFINER/i);
+  assert.match(
+    migration,
+    /CREATE OR REPLACE FUNCTION app_store_webhook_event\([\s\S]+?RETURNS bigint[\s\S]+?SECURITY DEFINER[\s\S]+?SET search_path = pg_catalog, pg_temp[\s\S]+?ON CONFLICT \(provider, event_key\) DO NOTHING/i,
+  );
+  assert.match(
+    migration,
+    /REVOKE ALL ON FUNCTION app_store_webhook_event\(text, text, jsonb\)[\s\S]+?FROM PUBLIC, sm_operator, sm_worker, sm_n8n_core/i,
+  );
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION app_store_webhook_event\(text, text, jsonb\) TO sm_app/i,
+  );
   assert.match(migration, /REVOKE ALL ON FUNCTION app_admin_list_clients\(\) FROM PUBLIC/i);
 });
 
