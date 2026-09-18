@@ -206,6 +206,16 @@ interface BufferPostNode {
   error?: { message?: string; supportUrl?: string | null } | null;
 }
 
+type BufferCreatePostResult =
+  | { __typename: 'PostActionSuccess'; post: BufferPostNode }
+  | { __typename: string; message?: string; code?: number; link?: string | null };
+
+function isBufferCreatePostSuccess(
+  result: BufferCreatePostResult,
+): result is Extract<BufferCreatePostResult, { __typename: 'PostActionSuccess' }> {
+  return result.__typename === 'PostActionSuccess' && 'post' in result;
+}
+
 interface AssetImageInput {
   url: string;
   metadata?: { altText: string };
@@ -547,10 +557,7 @@ async function publishViaBuffer(ctx: ProviderContext, input: PublishInput): Prom
   const post = buildCreatePostInput(ctx, input);
 
   let payload: {
-    createPost:
-      | { __typename: 'PostActionSuccess'; post: BufferPostNode }
-      | { __typename: string; message?: string; code?: number; link?: string | null }
-      | null;
+    createPost: BufferCreatePostResult | null;
   };
   try {
     payload = await bufferGql(ctx.http, token, CREATE_POST, { input: post }, 'CreatePost');
@@ -563,7 +570,7 @@ async function publishViaBuffer(ctx: ProviderContext, input: PublishInput): Prom
   const result = payload.createPost;
   if (!result) throw ProviderError.invalid('Buffer CreatePost returned no result.');
 
-  if (result.__typename !== 'PostActionSuccess') {
+  if (!isBufferCreatePostSuccess(result)) {
     const message = typeof result.message === 'string' && result.message ? result.message : `Buffer rejected the post (${result.__typename})`;
     const link = typeof result.link === 'string' && result.link ? ` (${result.link})` : '';
     switch (result.__typename) {
