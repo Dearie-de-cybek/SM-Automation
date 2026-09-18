@@ -10,14 +10,7 @@ export async function consumeLoginToken(formData: FormData): Promise<void> {
 
   const sql = db();
   const [row] = await sql<{ client_id: string | null; chat_id: string; is_admin: boolean; client_active: boolean | null }[]>`
-    WITH used AS (
-      UPDATE login_tokens SET used_at = now()
-      WHERE token_hash = digest(${token}::text, 'sha256') AND used_at IS NULL AND expires_at > now()
-      RETURNING client_id, chat_id, is_admin
-    )
-    SELECT u.client_id, u.chat_id::text AS chat_id, u.is_admin, c.active AS client_active
-    FROM used u
-    LEFT JOIN clients c ON c.id = u.client_id`;
+    SELECT * FROM app_consume_login_token(${token})`;
 
   if (!row) redirect('/login?error=expired');
   if (row.client_id && !row.client_active && !row.is_admin) redirect('/login?error=inactive');

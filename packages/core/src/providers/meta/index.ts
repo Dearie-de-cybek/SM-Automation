@@ -49,7 +49,10 @@ export function createMetaProvider(): SocialProvider {
     capabilities: (channel: Channel): Capabilities => adapterFor(channel).capabilities(),
     listAccounts(credentials: Record<string, unknown>, http: HttpClient): Promise<DiscoveredAccount[]> {
       const graphVersion = credentialString(credentials, 'graphVersion') ?? DEFAULT_GRAPH_VERSION;
-      return listMetaAccounts(http, { graphVersion }, requireCredential(credentials, 'accessToken'));
+      // The app secret travels with the connection credentials so calls can be signed
+      // with appsecret_proof without the adapter reading env.
+      const appSecret = credentialString(credentials, 'appSecret');
+      return listMetaAccounts(http, { graphVersion, appSecret }, requireCredential(credentials, 'accessToken'));
     },
     validate(ctx: ProviderContext): Promise<ValidatedAccount> {
       return adapterFor(ctx.account.channel).validate(ctx);

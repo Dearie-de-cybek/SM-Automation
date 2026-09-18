@@ -29,13 +29,7 @@ export async function signup(_prev: SignupState, formData: FormData): Promise<Si
 
   const linkCode = randomBytes(16).toString('hex');
   const sql = db();
-  await sql`
-    WITH created AS (
-      INSERT INTO clients (name, timezone, telegram_link_code)
-      VALUES (${parsed.data.name}, ${parsed.data.timezone}, ${linkCode})
-      RETURNING id
-    )
-    INSERT INTO brand_profiles (client_id) SELECT id FROM created`;
+  await sql`SELECT app_create_client(${parsed.data.name}, ${parsed.data.timezone}, ${linkCode})`;
 
   redirect(`/signup/telegram?code=${linkCode}`);
 }
