@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGPASSWORD: postgres
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/smapp_test
+      APP_DB_USER: sm_app_test
+      APP_DB_PASSWORD: app-test-password
+      OPERATOR_DB_USER: sm_operator_test
+      OPERATOR_DB_PASSWORD: operator-test-password
+      WORKER_DB_USER: sm_worker_test
+      WORKER_DB_PASSWORD: worker-test-password
+      N8N_DB_NAME: n8n_test
+      N8N_DB_USER: sm_n8n_test
+      N8N_DB_PASSWORD: n8n-test-password
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/smapp_test
+      TEST_APP_DATABASE_URL: postgres://sm_app_test:app-test-password@127.0.0.1:5432/smapp_test
+      TEST_OPERATOR_DATABASE_URL: postgres://sm_operator_test:operator-test-password@127.0.0.1:5432/smapp_test
+      TEST_WORKER_DATABASE_URL: postgres://sm_worker_test:worker-test-password@127.0.0.1:5432/smapp_test
+      TEST_N8N_DATABASE_URL: postgres://sm_n8n_test:n8n-test-password@127.0.0.1:5432/n8n_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Create isolated test databases
+        run: |
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE smapp_test'
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE n8n_test'
+
+      - name: Apply migrations twice
+        run: |
+          npm run migrate
+          npm run migrate
+
+      - name: Provision least-privilege runtime roles
+        run: >-
+          psql -h 127.0.0.1 -U postgres -d smapp_test -v ON_ERROR_STOP=1
+          -f db/sql/provision_runtime_roles.sql
+
+      - name: Run contract and workspace tests
+        run: |
+          npm test
+          npm test --workspaces --if-present
+
+      - name: Run PostgreSQL security integration tests
+        run: npm run test:db:integration
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build

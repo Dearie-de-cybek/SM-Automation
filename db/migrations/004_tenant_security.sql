@@ -7,10 +7,20 @@ DECLARE
   incompatible boolean;
 BEGIN
   FOREACH role_name IN ARRAY ARRAY['sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core'] LOOP
-    SELECT rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
+    SELECT runtime_role.rolcanlogin
+           OR runtime_role.rolsuper
+           OR runtime_role.rolcreatedb
+           OR runtime_role.rolcreaterole
+           OR runtime_role.rolreplication
+           OR runtime_role.rolbypassrls
+           OR EXISTS (
+             SELECT 1
+               FROM pg_catalog.pg_auth_members inherited_membership
+              WHERE inherited_membership.member = runtime_role.oid
+           )
       INTO incompatible
-      FROM pg_catalog.pg_roles
-     WHERE rolname = role_name;
+      FROM pg_catalog.pg_roles runtime_role
+     WHERE runtime_role.rolname = role_name;
 
     IF NOT FOUND THEN
       EXECUTE format(
@@ -314,6 +324,19 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON clients, brand_profiles, posts, post_ver
   webhook_events, system_counters, data_deletion_requests TO sm_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sm_worker;
 
+CREATE OR REPLACE FUNCTION app_store_webhook_event(
+  p_provider text, p_event_key text, p_payload jsonb
+)
+RETURNS bigint
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+  INSERT INTO public.webhook_events (provider, event_key, payload)
+  VALUES (p_provider, p_event_key, p_payload)
+  ON CONFLICT (provider, event_key) DO NOTHING
+  RETURNING id
+$function$;
+
 CREATE OR REPLACE FUNCTION app_create_client(p_name text, p_timezone text, p_link_code text)
 RETURNS uuid
 LANGUAGE plpgsql
@@ -473,6 +496,8 @@ AS $function$
 $function$;
 
 REVOKE ALL ON FUNCTION app_create_client(text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_store_webhook_event(text, text, jsonb)
+  FROM PUBLIC, sm_operator, sm_worker, sm_n8n_core;
 REVOKE ALL ON FUNCTION app_signup_client(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_consume_login_token(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_admin_create_client(text, text) FROM PUBLIC;
@@ -489,6 +514,7 @@ REVOKE ALL ON FUNCTION app_meta_deauthorize(text) FROM sm_app;
 REVOKE ALL ON FUNCTION app_meta_delete_user(text, text) FROM sm_app;
 
 GRANT EXECUTE ON FUNCTION app_create_client(text, text, text) TO sm_app;
+GRANT EXECUTE ON FUNCTION app_store_webhook_event(text, text, jsonb) TO sm_app;
 GRANT EXECUTE ON FUNCTION app_signup_client(text) TO sm_app;
 GRANT EXECUTE ON FUNCTION app_consume_login_token(text) TO sm_app;
 GRANT EXECUTE ON FUNCTION app_data_deletion_status(text) TO sm_app;
