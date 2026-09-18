@@ -7,7 +7,7 @@ const read = (path: string): Promise<string> => readFile(new URL(`../${path}`, i
 test('tenant-security migration installs forced RLS and narrow runtime roles', async () => {
   const migration = await read('db/migrations/004_tenant_security.sql');
 
-  const requiredRoles = ['sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core'];
+  const requiredRoles = ['sm_app', 'sm_operator', 'sm_worker'];
   const roleLoop = migration.match(
     /FOREACH role_name IN ARRAY ARRAY\[(?<roles>[^\]]+)\] LOOP/i,
   );
@@ -57,7 +57,7 @@ test('tenant-security migration installs forced RLS and narrow runtime roles', a
   );
   assert.match(
     migration,
-    /REVOKE ALL ON FUNCTION app_store_webhook_event\(text, text, jsonb\)[\s\S]+?FROM PUBLIC, sm_operator, sm_worker, sm_n8n_core/i,
+    /REVOKE ALL ON FUNCTION app_store_webhook_event\(text, text, jsonb\)[\s\S]+?FROM PUBLIC, sm_operator, sm_worker\s*;/i,
   );
   assert.match(
     migration,
@@ -76,8 +76,11 @@ test('compose never gives a long-running service the bootstrap database login', 
   assert.match(compose, /DATABASE_URL: postgres:\/\/\$\{APP_DB_USER\}/);
   assert.match(compose, /DATABASE_URL: postgres:\/\/\$\{WORKER_DB_USER\}/);
   assert.match(compose, /OPERATOR_DATABASE_URL: postgres:\/\/\$\{OPERATOR_DB_USER\}/);
-  assert.match(compose, /DB_POSTGRESDB_USER: \$\{N8N_DB_USER\}/);
-  assert.doesNotMatch(compose, /DB_POSTGRESDB_USER: \$\{POSTGRES_USER\}/);
+  assert.equal(
+    (compose.match(/DATABASE_URL: postgres:\/\/\$\{POSTGRES_USER\}/g) ?? []).length,
+    1,
+    'only the one-shot migration service may use the bootstrap database login',
+  );
 
   for (const key of [
     'APP_DB_USER',
@@ -86,8 +89,6 @@ test('compose never gives a long-running service the bootstrap database login', 
     'OPERATOR_DB_PASSWORD',
     'WORKER_DB_USER',
     'WORKER_DB_PASSWORD',
-    'N8N_DB_USER',
-    'N8N_DB_PASSWORD',
   ]) {
     assert.match(envExample, new RegExp(`^${key}=`, 'm'), `${key} must be documented`);
   }

@@ -7,8 +7,7 @@ const adminUrl = process.env.TEST_DATABASE_ADMIN_URL;
 const appUrl = process.env.TEST_APP_DATABASE_URL;
 const operatorUrl = process.env.TEST_OPERATOR_DATABASE_URL;
 const workerUrl = process.env.TEST_WORKER_DATABASE_URL;
-const n8nUrl = process.env.TEST_N8N_DATABASE_URL;
-const run = adminUrl && appUrl && operatorUrl && workerUrl && n8nUrl ? test : test.skip;
+const run = adminUrl && appUrl && operatorUrl && workerUrl ? test : test.skip;
 
 const clientA = '10000000-0000-4000-8000-000000000001';
 const clientB = '10000000-0000-4000-8000-000000000002';
@@ -22,15 +21,13 @@ let admin: postgres.Sql;
 let app: postgres.Sql;
 let operator: postgres.Sql;
 let worker: postgres.Sql;
-let n8n: postgres.Sql;
 
 before(async () => {
-  if (!adminUrl || !appUrl || !operatorUrl || !workerUrl || !n8nUrl) return;
+  if (!adminUrl || !appUrl || !operatorUrl || !workerUrl) return;
   admin = postgres(adminUrl, { max: 1 });
   app = postgres(appUrl, { max: 1 });
   operator = postgres(operatorUrl, { max: 1 });
   worker = postgres(workerUrl, { max: 1 });
-  n8n = postgres(n8nUrl, { max: 1 });
 
   const [{ database }] = await admin<{ database: string }[]>`SELECT current_database() AS database`;
   assert.match(database, /test$/, 'integration tests require a dedicated database ending in test');
@@ -57,7 +54,7 @@ before(async () => {
 
 after(async () => {
   await Promise.all(
-    [admin, app, operator, worker, n8n].filter(Boolean).map((sql) => sql.end({ timeout: 5 })),
+    [admin, app, operator, worker].filter(Boolean).map((sql) => sql.end({ timeout: 5 })),
   );
 });
 
@@ -140,11 +137,11 @@ run('worker access is explicit while runtime logins remain unprivileged', async 
     SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
       FROM pg_roles
      WHERE rolname IN (
-       'sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core',
-       'sm_app_test', 'sm_operator_test', 'sm_worker_test', 'sm_n8n_test'
+       'sm_app', 'sm_operator', 'sm_worker',
+       'sm_app_test', 'sm_operator_test', 'sm_worker_test'
      )
      ORDER BY rolname`;
-  assert.equal(roles.length, 8);
+  assert.equal(roles.length, 6);
   assert.ok(roles.every((role) => !role.rolsuper && !role.rolcreatedb && !role.rolcreaterole && !role.rolbypassrls));
 
   const nestedMemberships = await admin<{ member: string; inherited_role: string }[]>`
@@ -152,20 +149,13 @@ run('worker access is explicit while runtime logins remain unprivileged', async 
       FROM pg_auth_members membership
       JOIN pg_roles member_role ON member_role.oid = membership.member
       JOIN pg_roles inherited_role ON inherited_role.oid = membership.roleid
-     WHERE member_role.rolname IN ('sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core')`;
+     WHERE member_role.rolname IN ('sm_app', 'sm_operator', 'sm_worker')`;
   assert.equal(nestedMemberships.length, 0);
 });
 
-run('PUBLIC and n8n-core cannot connect to app database', async () => {
+run('PUBLIC cannot connect to app database', async () => {
   const [{ database }] = await admin<{ database: string }[]>`SELECT current_database() AS database`;
   const [{ allowed }] = await admin<{ allowed: boolean }[]>`
     SELECT has_database_privilege('public', ${database}, 'CONNECT') AS allowed`;
   assert.equal(allowed, false);
-
-  await n8n`SELECT 1`;
-  const appDatabaseUrlForN8n = new URL(n8nUrl as string);
-  appDatabaseUrlForN8n.pathname = `/${database}`;
-  const forbidden = postgres(appDatabaseUrlForN8n.toString(), { max: 1, connect_timeout: 2 });
-  await assert.rejects(forbidden`SELECT 1`, /permission denied for database/i);
-  await forbidden.end({ timeout: 1 }).catch(() => undefined);
 });

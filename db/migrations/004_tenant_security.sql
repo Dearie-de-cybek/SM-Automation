@@ -6,7 +6,7 @@ DECLARE
   role_name text;
   incompatible boolean;
 BEGIN
-  FOREACH role_name IN ARRAY ARRAY['sm_app', 'sm_operator', 'sm_worker', 'sm_n8n_core'] LOOP
+  FOREACH role_name IN ARRAY ARRAY['sm_app', 'sm_operator', 'sm_worker'] LOOP
     SELECT runtime_role.rolcanlogin
            OR runtime_role.rolsuper
            OR runtime_role.rolcreatedb
@@ -34,12 +34,10 @@ BEGIN
 END
 $roles$;
 
--- No implicit database access. n8n-core is intentionally absent: it owns only n8n's
--- internal database and uses an imported sm_worker credential for legacy workflows.
+-- No implicit database access. Runtime groups connect only to the application database.
 DO $database_access$
 BEGIN
   EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', current_database());
-  EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM sm_n8n_core', current_database());
   EXECUTE format('GRANT CONNECT ON DATABASE %I TO sm_app, sm_operator, sm_worker', current_database());
 END
 $database_access$;
@@ -294,8 +292,8 @@ CREATE POLICY oauth_states_worker_all ON oauth_states TO sm_worker USING (true) 
 DROP POLICY IF EXISTS content_requests_worker_all ON content_requests;
 CREATE POLICY content_requests_worker_all ON content_requests TO sm_worker USING (true) WITH CHECK (true);
 
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM sm_app, sm_operator, sm_worker, sm_n8n_core;
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM sm_app, sm_operator, sm_worker, sm_n8n_core;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM sm_app, sm_operator, sm_worker;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM sm_app, sm_operator, sm_worker;
 
 -- Tenant dashboard privileges. login_tokens/chat_sessions and global service tables are
 -- intentionally absent; pre-authentication is available only through functions below.
@@ -316,7 +314,7 @@ GRANT SELECT, INSERT ON post_versions, audit_log TO sm_app;
 GRANT SELECT ON knowledge_chunks, usage_counters TO sm_app;
 GRANT USAGE, SELECT ON SEQUENCE post_versions_id_seq, audit_log_id_seq TO sm_app;
 
--- Worker owns every state transition, sweep, webhook and legacy workflow query.
+-- Worker owns every state transition, sweep, and webhook query.
 GRANT SELECT, INSERT, UPDATE, DELETE ON clients, brand_profiles, posts, post_versions,
   chat_sessions, audit_log, login_tokens, campaigns, provider_connections,
   social_accounts, post_targets, comments, comment_replies, automation_policies,
@@ -497,7 +495,7 @@ $function$;
 
 REVOKE ALL ON FUNCTION app_create_client(text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_store_webhook_event(text, text, jsonb)
-  FROM PUBLIC, sm_operator, sm_worker, sm_n8n_core;
+  FROM PUBLIC, sm_operator, sm_worker;
 REVOKE ALL ON FUNCTION app_signup_client(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_consume_login_token(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_admin_create_client(text, text) FROM PUBLIC;
